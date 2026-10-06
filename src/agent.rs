@@ -19,11 +19,14 @@ pub trait Agent: Sync {
     /// Two animation frames; frame 1 only shows while working.
     fn sprite(&self, frame: usize) -> [&'static str; 3];
 
+    fn busy(&self, screen: &str) -> bool {
+        self.busy_marks().iter().any(|m| screen.contains(m))
+    }
+
     fn read_screen(&self, screen: &str) -> Option<State> {
-        let has = |marks: &[&str]| marks.iter().any(|m| screen.contains(m));
-        if has(self.ask_marks()) {
+        if self.ask_marks().iter().any(|m| screen.contains(m)) {
             Some(State::NeedsInput)
-        } else if has(self.busy_marks()) {
+        } else if self.busy(screen) {
             Some(State::Working)
         } else {
             None
@@ -57,6 +60,15 @@ impl Agent for Claude {
     fn matches(&self, cmd: &str) -> bool { runs(cmd, "claude") }
     fn busy_marks(&self) -> &'static [&'static str] { &["esc to interrupt"] }
     fn ask_marks(&self) -> &'static [&'static str] { &["Do you want to", "❯ 1. Yes"] }
+    /// Status line while working: `✳ Deliberating…`, `✻ Jitterbugging… (12s · ↓ 4 tokens)`.
+    /// When done it turns into `✻ Baked for 3s · done`, which has no `…` word.
+    fn busy(&self, screen: &str) -> bool {
+        screen.lines().any(|l| {
+            let mut words = l.split_whitespace();
+            words.next().is_some_and(|g| matches!(g, "✳" | "✻" | "✢" | "✶" | "✽" | "·" | "*"))
+                && words.next().is_some_and(|w| w.ends_with('…'))
+        })
+    }
     fn sprite(&self, f: usize) -> [&'static str; 3] {
         [[" ▐▛███▜▌ ", "▝▜█████▛▘", "  ▘▘ ▝▝  "], [" ▐▛███▜▌ ", "▝▜█████▛▘", " ▝▘  ▘▝  "]][f % 2]
     }
@@ -149,6 +161,9 @@ mod tests {
         assert_eq!(detect("node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js").unwrap().name(), "claude");
         let c = detect("claude").unwrap();
         assert_eq!(c.read_screen("✻ Thinking… (esc to interrupt)"), Some(State::Working));
+        assert_eq!(c.read_screen("⏺ ok\n✳ Deliberating…\n❯"), Some(State::Working));
+        assert_eq!(c.read_screen("✻ Jitterbugging… (running Stop hooks… 1/2 · 1s)"), Some(State::Working));
+        assert_eq!(c.read_screen("⏺ The command printed hi.\n✻ Baked for 3s · done 1:52 AM\n❯"), None);
         assert_eq!(c.read_screen("Do you want to proceed?\n❯ 1. Yes"), Some(State::NeedsInput));
         assert_eq!(c.read_screen("> "), None);
         assert_eq!(c.file_ref("src/a.rs"), "@src/a.rs ");

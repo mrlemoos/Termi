@@ -182,6 +182,11 @@ impl eframe::App for App {
             self.last_poll = Instant::now();
         }
 
+        // you're looking at the active tab, so its "done" has been seen
+        if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            self.tabs[self.active].done = false;
+        }
+
         let show = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y < TITLEBAR);
         if self.lights != Some(show) {
             set_traffic_lights(show);
@@ -196,15 +201,17 @@ impl eframe::App for App {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             ui.horizontal(|ui| {
                 for (i, tab) in self.tabs.iter().enumerate() {
-                    let glyph = match (tab.agent.is_some(), tab.state) {
-                        (true, State::Working) => format!("{} ", spinner()),
-                        (true, State::NeedsInput) => "! ".into(),
+                    let glyph = match (tab.agent.is_some(), tab.state, tab.done) {
+                        (true, State::Working, _) => format!("{} ", spinner()),
+                        (true, State::NeedsInput, _) => "! ".into(),
+                        (true, State::Idle, true) => "✓ ".into(),
                         _ => String::new(),
                     };
                     let mut text = egui::RichText::new(format!(" ⌘{} {glyph}{} ", i + 1, tab.label())).font(font.clone());
                     text = match (i == self.active, tab.state) {
                         (true, _) => text.color(BG).background_color(FG),
                         (false, State::NeedsInput) => text.color(Color32::from_rgb(0xcd, 0xcd, 0x00)),
+                        (false, State::Idle) if tab.done => text.color(Color32::from_rgb(0x00, 0xcd, 0x00)),
                         _ => text.color(Color32::from_gray(160)),
                     };
                     if ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false)).clicked() {

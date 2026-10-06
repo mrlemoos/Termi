@@ -51,6 +51,8 @@ pub struct Tab {
     pub cwd: PathBuf,
     pub agent: Option<&'static dyn Agent>,
     pub state: State,
+    /// Finished working while you weren't looking; cleared when the tab is viewed.
+    pub done: bool,
     pub exited: bool,
     size: WindowSize,
 }
@@ -83,7 +85,7 @@ impl Tab {
 
         Ok(Tab {
             id, term, loop_tx, events, pid, fd, size, cwd,
-            title: String::new(), title_pgid: 0, fg: 0, cmd: String::new(), agent: None, state: State::Idle, exited: false,
+            title: String::new(), title_pgid: 0, fg: 0, cmd: String::new(), agent: None, state: State::Idle, done: false, exited: false,
         })
     }
 
@@ -150,9 +152,15 @@ impl Tab {
             self.cwd = cwd;
         }
         self.agent = agent::detect(&self.cmd);
+        let prev = self.state;
         self.state = match self.agent {
             Some(a) => agent::resolve(a, &self.screen_text(), self.id),
             None => State::Idle,
+        };
+        // ponytail: 1s poll, so a turn shorter than that can finish unseen; hooks catch those.
+        self.done = match self.state {
+            State::Idle => self.done || (prev == State::Working && self.agent.is_some()),
+            _ => false,
         };
     }
 
