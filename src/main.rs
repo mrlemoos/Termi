@@ -1,0 +1,386 @@
+use eframe::egui;
+
+mod agent;
+mod editor;
+mod term;
+mod tree;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use egui::{Color32, FontFamily, FontId, Key, Modifiers, Pos2, Rect, Sense, vec2};
+
+use agent::State;
+use editor::{Editor, Outcome};
+use term::{BG, Cell, FG, Fonts, Tab};
+
+const FONT_SIZE: f32 = 14.0;
+/// Height of the hidden titlebar strip: hover shows traffic lights, drag moves the window.
+const TITLEBAR: f32 = 28.0;
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+fn main() -> eframe::Result {
+    alacritty_terminal::tty::setup_env();
+    let _ = std::fs::create_dir_all(agent::state_dir());
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Termi")
+        .with_inner_size([1000.0, 640.0])
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
+    eframe::run_native(
+        "Termi",
+        eframe::NativeOptions { viewport, ..Default::default() },
+        Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))),
+    )
+}
+
+struct App {
+    tabs: Vec<Tab>,
+    active: usize,
+    next_id: u64,
+    tree: tree::Tree,
+    show_tree: bool,
+    editor: Option<Editor>,
+    fonts: Fonts,
+    lights: Option<bool>,
+    window_drag: bool,
+    scroll_acc: f32,
+    last_poll: Instant,
+}
+
+impl App {
+    fn new(ctx: &egui::Context) -> App {
+        install_fonts(ctx);
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = BG;
+        visuals.window_fill = BG;
+        visuals.extreme_bg_color = BG;
+        visuals.override_text_color = Some(FG);
+        ctx.set_visuals(visuals);
+
+        let mut app = App {
+            tabs: Vec::new(), active: 0, next_id: 1, tree: Default::default(), show_tree: false, editor: None,
+            fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
+            lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
+        app.new_tab(ctx, std::env::current_dir().ok().filter(|d| d != Path::new("/")).unwrap_or(home));
+        app
+    }
+
+    fn new_tab(&mut self, ctx: &egui::Context, cwd: PathBuf) {
+        match Tab::spawn(self.next_id, cwd, ctx) {
+            Ok(tab) => {
+                self.tabs.push(tab);
+                self.active = self.tabs.len() - 1;
+                self.next_id += 1;
+            }
+            Err(e) => eprintln!("termi: failed to spawn shell: {e}"),
+        }
+    }
+
+    fn cell(&self, ctx: &egui::Context) -> Cell {
+        ctx.fonts_mut(|f| Cell { w: f.glyph_width(&self.fonts.regular, 'M'), h: f.row_height(&self.fonts.regular) })
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let cmd = |k| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, k));
+        if cmd(Key::T) {
+            let cwd = self.tabs[self.active].cwd.clone();
+            self.new_tab(ctx, cwd);
+        }
+        if cmd(Key::W) {
+            self.tabs.remove(self.active);
+        }
+        if cmd(Key::B) {
+            self.show_tree = !self.show_tree;
+        }
+        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        for (i, k) in nums.into_iter().enumerate() {
+            if cmd(k) && i < self.tabs.len() {
+                self.active = i;
+            }
+        }
+    }
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut defs = egui::FontDefinitions::default();
+    let font = |b: &'static [u8]| Arc::new(egui::FontData::from_static(b));
+    defs.font_data.insert("meslo".into(), font(include_bytes!("../assets/MesloLGSNerdFontMono-Regular.ttf")));
+    defs.font_data.insert("meslo-bold".into(), font(include_bytes!("../assets/MesloLGSNerdFontMono-Bold.ttf")));
+    // Everything is monospace: it's a terminal.
+    for fam in [FontFamily::Monospace, FontFamily::Proportional] {
+        defs.families.entry(fam).or_default().insert(0, "meslo".into());
+    }
+    defs.families.insert(FontFamily::Name("bold".into()), vec!["meslo-bold".into(), "meslo".into()]);
+    ctx.set_fonts(defs);
+}
+
+#[cfg(target_os = "macos")]
+fn set_traffic_lights(show: bool) {
+    use objc2_app_kit::{NSApplication, NSWindowButton};
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    for w in NSApplication::sharedApplication(mtm).windows().iter() {
+        for b in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+            if let Some(btn) = w.standardWindowButton(b) {
+                btn.setHidden(!show);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_traffic_lights(_: bool) {}
+
+/// Path as typed into the prompt: relative to the tab's cwd, agent-specific format.
+fn file_ref(tab: &Tab, path: &Path) -> String {
+    let rel = path.strip_prefix(&tab.cwd).unwrap_or(path).to_string_lossy();
+    match tab.agent {
+        Some(a) => a.file_ref(&rel),
+        None => agent::shell_quote(&rel),
+    }
+}
+
+fn tilde(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    match std::env::var("HOME") {
+        Ok(h) if s.starts_with(&h) => format!("~{}", &s[h.len()..]),
+        _ => s.into_owned(),
+    }
+}
+
+fn spinner() -> char {
+    SPINNER[epoch_ms() / 100 % SPINNER.len()]
+}
+
+fn epoch_ms() -> usize {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as usize)
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        for t in &mut self.tabs {
+            t.pump(&ctx);
+        }
+        self.tabs.retain(|t| !t.exited);
+        if self.tabs.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.shortcuts(&ctx);
+        if self.tabs.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.active = self.active.min(self.tabs.len() - 1);
+        if self.last_poll.elapsed() > Duration::from_secs(1) {
+            self.tabs.iter_mut().for_each(Tab::poll);
+            self.last_poll = Instant::now();
+        }
+
+        let show = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y < TITLEBAR);
+        if self.lights != Some(show) {
+            set_traffic_lights(show);
+            self.lights = Some(show);
+        }
+
+        let cell = self.cell(&ctx);
+        let font = self.fonts.regular.clone();
+
+        // ---- status line: ⌘n badges, tmux style ----
+        egui::Panel::bottom("status").exact_size(cell.h).frame(egui::Frame::NONE.fill(Color32::from_gray(24))).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            ui.horizontal(|ui| {
+                for (i, tab) in self.tabs.iter().enumerate() {
+                    let glyph = match (tab.agent.is_some(), tab.state) {
+                        (true, State::Working) => format!("{} ", spinner()),
+                        (true, State::NeedsInput) => "! ".into(),
+                        _ => String::new(),
+                    };
+                    let mut text = egui::RichText::new(format!(" ⌘{} {glyph}{} ", i + 1, tab.label())).font(font.clone());
+                    text = match (i == self.active, tab.state) {
+                        (true, _) => text.color(BG).background_color(FG),
+                        (false, State::NeedsInput) => text.color(Color32::from_rgb(0xcd, 0xcd, 0x00)),
+                        _ => text.color(Color32::from_gray(160)),
+                    };
+                    if ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false)).clicked() {
+                        self.active = i;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(format!("{} ", tilde(&self.tabs[self.active].cwd))).font(font.clone()).color(Color32::from_gray(120)));
+                });
+            });
+        });
+
+        // ---- tree ----
+        if self.show_tree {
+            let cwd = self.tabs[self.active].cwd.clone();
+            egui::Panel::left("tree")
+                .resizable(true)
+                .default_size(260.0)
+                .frame(egui::Frame::NONE.fill(BG).inner_margin(egui::Margin { left: 6, right: 6, top: TITLEBAR as i8, bottom: 0 }))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        if let Some(tree::Action::Open(p)) = self.tree.show(ui, &cwd, &font) {
+                            match Editor::open(p) {
+                                Ok(ed) => self.editor = Some(ed),
+                                Err(e) => eprintln!("termi: {e}"),
+                            }
+                        }
+                    });
+                });
+        }
+
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            if let Some(ed) = &mut self.editor {
+                let tab = &self.tabs[self.active];
+                let shown = ed.path.strip_prefix(&tab.cwd).unwrap_or(&ed.path).to_string_lossy().into_owned();
+                ui.add_space(TITLEBAR);
+                match ed.show(ui, &font, &shown) {
+                    Outcome::Stay => {}
+                    Outcome::Close => self.editor = None,
+                    Outcome::Send(prompt) => {
+                        tab.paste(&prompt);
+                        self.editor = None;
+                    }
+                }
+                return;
+            }
+            self.terminal(ui, &ctx, &cell, show);
+        });
+
+        // drag preview for tree → prompt
+        if let (Some(path), Some(pos)) = (egui::DragAndDrop::payload::<PathBuf>(&ctx), ctx.pointer_hover_pos()) {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd")));
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let r = painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), BG);
+            painter.rect_filled(r.expand(2.0), 0.0, FG);
+            painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), BG);
+        }
+
+        let busy = self.tabs.iter().any(|t| t.agent.is_some() && t.state == State::Working);
+        ctx.request_repaint_after(Duration::from_millis(if busy { 100 } else { 1000 }));
+    }
+}
+
+impl App {
+    fn terminal(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, cell: &Cell, lights: bool) {
+        let rect = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+        let origin = rect.min + vec2(4.0, 0.0);
+        let tab = &mut self.tabs[self.active];
+        let (cols, rows) = term::grid_size(rect.size() - vec2(8.0, 0.0), cell);
+        tab.resize(cols, rows, cell);
+
+        if ui.memory(|m| m.focused().is_none()) || resp.clicked() {
+            resp.request_focus();
+        }
+        let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+        ui.memory_mut(|m| m.set_focus_lock_filter(resp.id, filter));
+
+        if resp.has_focus() {
+            let app_cursor = tab.term.lock().mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
+            for ev in ctx.input(|i| i.events.clone()) {
+                match ev {
+                    egui::Event::Text(s) => tab.paste_raw(&s),
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                        if let Some(b) = term::key_bytes(key, modifiers, app_cursor) {
+                            tab.paste_raw(std::str::from_utf8(&b).unwrap_or(""));
+                        }
+                    }
+                    egui::Event::Paste(s) => tab.paste(&s),
+                    egui::Event::Copy => {
+                        if let Some(s) = tab.term.lock().selection_to_string() {
+                            ctx.copy_text(s);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if resp.hovered() {
+            for ev in ctx.input(|i| i.events.clone()) {
+                if let egui::Event::MouseWheel { unit, delta, .. } = ev {
+                    self.scroll_acc += match unit {
+                        egui::MouseWheelUnit::Point => delta.y / cell.h,
+                        egui::MouseWheelUnit::Line => delta.y,
+                        egui::MouseWheelUnit::Page => delta.y * rows as f32,
+                    };
+                }
+            }
+            let lines = self.scroll_acc.trunc() as i32;
+            if lines != 0 {
+                tab.scroll(lines);
+                self.scroll_acc -= lines as f32;
+            }
+        }
+
+        // mouse: titlebar strip drags the window, elsewhere selects text
+        if resp.drag_started() {
+            let start = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.min);
+            self.window_drag = lights && start.y < TITLEBAR;
+            if self.window_drag {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            } else {
+                tab.start_selection(start, origin, cell);
+            }
+        }
+        if resp.dragged() && !self.window_drag {
+            if let Some(p) = resp.interact_pointer_pos() {
+                tab.update_selection(p, origin, cell);
+            }
+        }
+        if resp.clicked() {
+            tab.term.lock().selection = None;
+        }
+
+        // drops: tree rows and Finder files
+        if let Some(path) = resp.dnd_release_payload::<PathBuf>() {
+            tab.paste_raw(&file_ref(tab, &path));
+        }
+        for f in ctx.input(|i| i.raw.dropped_files.clone()) {
+            tab.paste_raw(&file_ref(tab, f.path()));
+        }
+
+        let painter = ui.painter_at(rect);
+        term::paint(tab, &painter, origin, cell, &self.fonts, resp.has_focus());
+        if resp.dnd_hover_payload::<PathBuf>().is_some() {
+            painter.rect_stroke(rect.shrink(1.0), 0.0, egui::Stroke::new(1.0, FG), egui::StrokeKind::Inside);
+        }
+        if let Some(a) = tab.agent {
+            mascot(&painter, rect, cell, a, tab.state);
+        }
+    }
+}
+
+/// Tamagotchi: tiny sprite bottom-right. Walks + bobs while working, shouts when it needs you.
+fn mascot(painter: &egui::Painter, rect: Rect, cell: &Cell, a: &dyn agent::Agent, state: State) {
+    const SCALE: f32 = 0.55;
+    let font = FontId::new(FONT_SIZE * SCALE, FontFamily::Monospace);
+    let (w, h) = (cell.w * SCALE, cell.h * SCALE);
+    let tick = epoch_ms() / 250;
+    let working = state == State::Working;
+    let (frame, bob) = if working { (tick, if tick % 2 == 0 { -1.0 } else { 0.0 }) } else { (0, 0.0) };
+    let sprite = a.sprite(frame);
+    let cols = sprite.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+    let top_left = Pos2::new(rect.right() - (cols + 2.0) * w, rect.bottom() - 4.0 * h);
+    painter.rect_filled(Rect::from_min_size(top_left - vec2(w, h), vec2((cols + 3.0) * w, 5.0 * h)), 2.0, Color32::from_black_alpha(200));
+    let [r, g, b] = a.color();
+    for (i, line) in sprite.iter().enumerate() {
+        painter.text(top_left + vec2(0.0, i as f32 * h + bob), egui::Align2::LEFT_TOP, *line, font.clone(), Color32::from_rgb(r, g, b));
+    }
+    let badge = match state {
+        State::Working => Some((spinner().to_string(), Color32::from_gray(160))),
+        State::NeedsInput => Some(("!".to_owned(), Color32::from_rgb(0xcd, 0xcd, 0x00))),
+        State::Idle => None,
+    };
+    if let Some((text, color)) = badge {
+        painter.text(top_left + vec2(cols * w, -h), egui::Align2::LEFT_TOP, text, font, color);
+    }
+}
