@@ -44,6 +44,9 @@ pub struct Tab {
     pid: u32,
     fd: i32,
     pub title: String,
+    /// Foreground process group that set `title`; a title only names the session of whoever set it.
+    title_pgid: i32,
+    fg: i32,
     pub cmd: String,
     pub cwd: PathBuf,
     pub agent: Option<&'static dyn Agent>,
@@ -80,7 +83,7 @@ impl Tab {
 
         Ok(Tab {
             id, term, loop_tx, events, pid, fd, size, cwd,
-            title: String::new(), cmd: String::new(), agent: None, state: State::Idle, exited: false,
+            title: String::new(), title_pgid: 0, fg: 0, cmd: String::new(), agent: None, state: State::Idle, exited: false,
         })
     }
 
@@ -115,7 +118,10 @@ impl Tab {
     pub fn pump(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events.try_recv() {
             match ev {
-                Event::Title(t) => self.title = t,
+                Event::Title(t) => {
+                    self.title = t;
+                    self.title_pgid = unsafe { libc::tcgetpgrp(self.fd) };
+                }
                 Event::ResetTitle => self.title.clear(),
                 Event::PtyWrite(s) => self.write(s),
                 Event::ClipboardStore(_, s) => ctx.copy_text(s),
@@ -132,8 +138,8 @@ impl Tab {
 
     /// Foreground process, cwd, agent + its state. Called ~1/s.
     pub fn poll(&mut self) {
-        let fg = unsafe { libc::tcgetpgrp(self.fd) };
-        let fg = if fg > 0 { fg as u32 } else { self.pid };
+        self.fg = unsafe { libc::tcgetpgrp(self.fd) };
+        let fg = if self.fg > 0 { self.fg as u32 } else { self.pid };
         // ponytail: one `ps` per tab per poll; sysctl(KERN_PROCARGS2) if this ever shows up in a profile.
         self.cmd = std::process::Command::new("ps")
             .args(["-o", "command=", "-p", &fg.to_string()])
@@ -167,7 +173,10 @@ impl Tab {
     /// Label for the status line.
     pub fn label(&self) -> String {
         match self.agent {
-            Some(a) => a.name().to_owned(),
+            Some(a) => match session_name(&self.title, a.name()).filter(|_| self.title_pgid == self.fg) {
+                Some(s) => format!("{}: {s}", a.name()),
+                None => a.name().to_owned(),
+            },
             None => self.cmd.split_whitespace().next().unwrap_or("zsh").rsplit('/').next().unwrap_or("").trim_start_matches('-').to_owned(),
         }
     }
@@ -202,6 +211,20 @@ impl Drop for Tab {
     fn drop(&mut self) {
         let _ = self.loop_tx.send(Msg::Shutdown);
     }
+}
+
+/// Session name from an agent's terminal title: drop spinner/status glyphs,
+/// ignore the agent's default title ("Claude Code"), cap the length.
+// ponytail: "title mentions the agent = default title" heuristic.
+fn session_name(title: &str, agent: &str) -> Option<String> {
+    let name = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    if name.is_empty() || name.to_lowercase().contains(agent) {
+        return None;
+    }
+    Some(match name.char_indices().nth(24) {
+        Some((i, _)) => format!("{}…", &name[..i]),
+        None => name.to_owned(),
+    })
 }
 
 fn to_point<T>(t: &Term<T>, p: Pos2, origin: Pos2, cell: &Cell) -> (Point, Side) {
@@ -407,6 +430,10 @@ mod tests {
         assert_eq!(key_bytes(Key::ArrowUp, none, false).unwrap().as_ref(), b"\x1b[A");
         assert!(key_bytes(Key::T, Modifiers::COMMAND, false).is_none());
         assert!(key_bytes(Key::A, none, false).is_none());
+        assert_eq!(session_name("✳ Fix login bug", "claude").as_deref(), Some("Fix login bug"));
+        assert_eq!(session_name("⠂ Claude Code", "claude"), None);
+        assert_eq!(session_name("", "codex"), None);
+        assert_eq!(session_name("a very long session name that goes on", "grok").as_deref(), Some("a very long session name…"));
         assert_eq!(index_color(16), Color32::BLACK);
         assert_eq!(index_color(231), Color32::WHITE);
         assert_eq!(index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize), BG);
