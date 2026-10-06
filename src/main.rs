@@ -273,9 +273,9 @@ impl App {
     fn terminal(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, cell: &Cell, lights: bool) {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let origin = rect.min + vec2(4.0, 0.0);
+        let origin = rect.min + vec2(4.0, TITLEBAR);
         let tab = &mut self.tabs[self.active];
-        let (cols, rows) = term::grid_size(rect.size() - vec2(8.0, 0.0), cell);
+        let (cols, rows) = term::grid_size(rect.size() - vec2(8.0, TITLEBAR), cell);
         tab.resize(cols, rows, cell);
 
         if ui.memory(|m| m.focused().is_none()) || resp.clicked() {
