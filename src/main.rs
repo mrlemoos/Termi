@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{Color32, FontFamily, FontId, Key, Modifiers, Pos2, Rect, Sense, vec2};
+use egui::{Color32, FontFamily, FontId, Key, Modifiers, Pos2, Sense, vec2};
 
 use agent::State;
 use editor::{Editor, Outcome};
@@ -210,6 +210,11 @@ impl eframe::App for App {
                     if ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false)).clicked() {
                         self.active = i;
                     }
+                    if let Some(a) = tab.agent {
+                        let cols = a.sprite(0).iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+                        let (r, _) = ui.allocate_exact_size(vec2((cols / 3.0 + 1.0) * cell.w, cell.h), Sense::hover());
+                        mascot(ui.painter(), r.min + vec2(cell.w * 0.5, 0.0), &cell, a, tab.state);
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(format!("{} ", tilde(&self.tabs[self.active].cwd))).font(font.clone()).color(Color32::from_gray(120)));
@@ -353,34 +358,16 @@ impl App {
         if resp.dnd_hover_payload::<PathBuf>().is_some() {
             painter.rect_stroke(rect.shrink(1.0), 0.0, egui::Stroke::new(1.0, FG), egui::StrokeKind::Inside);
         }
-        if let Some(a) = tab.agent {
-            mascot(&painter, rect, cell, a, tab.state);
-        }
     }
 }
 
-/// Tamagotchi: tiny sprite bottom-right. Walks + bobs while working, shouts when it needs you.
-fn mascot(painter: &egui::Painter, rect: Rect, cell: &Cell, a: &dyn agent::Agent, state: State) {
-    const SCALE: f32 = 0.55;
-    let font = FontId::new(FONT_SIZE * SCALE, FontFamily::Monospace);
-    let (w, h) = (cell.w * SCALE, cell.h * SCALE);
-    let tick = epoch_ms() / 250;
-    let working = state == State::Working;
-    let (frame, bob) = if working { (tick, if tick % 2 == 0 { -1.0 } else { 0.0 }) } else { (0, 0.0) };
-    let sprite = a.sprite(frame);
-    let cols = sprite.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
-    let top_left = Pos2::new(rect.right() - (cols + 2.0) * w, rect.bottom() - 4.0 * h);
-    painter.rect_filled(Rect::from_min_size(top_left - vec2(w, h), vec2((cols + 3.0) * w, 5.0 * h)), 2.0, Color32::from_black_alpha(200));
+/// Tamagotchi: the 3-row sprite squeezed into one status-line row. Walks while working.
+fn mascot(painter: &egui::Painter, top_left: Pos2, cell: &Cell, a: &dyn agent::Agent, state: State) {
+    let font = FontId::new(FONT_SIZE / 3.0, FontFamily::Monospace);
+    let frame = if state == State::Working { epoch_ms() / 250 } else { 0 };
     let [r, g, b] = a.color();
-    for (i, line) in sprite.iter().enumerate() {
-        painter.text(top_left + vec2(0.0, i as f32 * h + bob), egui::Align2::LEFT_TOP, *line, font.clone(), Color32::from_rgb(r, g, b));
-    }
-    let badge = match state {
-        State::Working => Some((spinner().to_string(), Color32::from_gray(160))),
-        State::NeedsInput => Some(("!".to_owned(), Color32::from_rgb(0xcd, 0xcd, 0x00))),
-        State::Idle => None,
-    };
-    if let Some((text, color)) = badge {
-        painter.text(top_left + vec2(cols * w, -h), egui::Align2::LEFT_TOP, text, font, color);
+    for (i, line) in a.sprite(frame).iter().enumerate() {
+        let pos = top_left + vec2(0.0, i as f32 * cell.h / 3.0);
+        painter.text(pos, egui::Align2::LEFT_TOP, *line, font.clone(), Color32::from_rgb(r, g, b));
     }
 }
