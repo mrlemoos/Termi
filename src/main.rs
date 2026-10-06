@@ -217,7 +217,9 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(format!("{} ", tilde(&self.tabs[self.active].cwd))).font(font.clone()).color(Color32::from_gray(120)));
+                    // clear the window's rounded corner
+                    ui.add_space(cell.w * 2.0);
+                    ui.label(egui::RichText::new(format!("{}", tilde(&self.tabs[self.active].cwd))).font(font.clone()).color(Color32::from_gray(120)));
                 });
             });
         });
