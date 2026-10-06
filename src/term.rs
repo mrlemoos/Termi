@@ -267,7 +267,8 @@ fn to_rgb(c: Color32) -> Rgb {
 }
 
 fn dim(c: Color32) -> Color32 {
-    Color32::from_rgb(c.r() * 2 / 3, c.g() * 2 / 3, c.b() * 2 / 3)
+    let d = |v: u8| (v as u16 * 2 / 3) as u8;
+    Color32::from_rgb(d(c.r()), d(c.g()), d(c.b()))
 }
 
 /// xterm 256-color table + alacritty's extra named slots.
@@ -434,6 +435,7 @@ mod tests {
         assert_eq!(session_name("⠂ Claude Code", "claude"), None);
         assert_eq!(session_name("", "codex"), None);
         assert_eq!(session_name("a very long session name that goes on", "grok").as_deref(), Some("a very long session name…"));
+        assert_eq!(dim(Color32::WHITE), Color32::from_gray(170));
         assert_eq!(index_color(16), Color32::BLACK);
         assert_eq!(index_color(231), Color32::WHITE);
         assert_eq!(index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize), BG);
