@@ -409,7 +409,8 @@ impl App {
         }
 
         let painter = ui.painter_at(rect);
-        term::paint(tab, &painter, origin, cell, &self.fonts, resp.has_focus());
+        // hollow cursor while the tree has the keys
+        term::paint(tab, &painter, origin, cell, &self.fonts, resp.has_focus() && !self.tree_focus);
         if resp.dnd_hover_payload::<PathBuf>().is_some() {
             painter.rect_stroke(rect.shrink(1.0), 0.0, egui::Stroke::new(1.0, FG), egui::StrokeKind::Inside);
         }
