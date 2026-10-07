@@ -4,8 +4,9 @@ set -e
 cd "$(dirname "$0")/.."
 cargo build --release
 APP=dist/Termi.app
-rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS"
+rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/termi "$APP/Contents/MacOS/termi"
+cp assets/Termi.icns "$APP/Contents/Resources/Termi.icns"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -17,6 +18,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>Termi</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
