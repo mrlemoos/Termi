@@ -329,8 +329,12 @@ impl eframe::App for App {
                         (false, State::Idle) if tab.done => text.color(Color32::from_rgb(0x00, 0xcd, 0x00)),
                         _ => text.color(Color32::from_gray(160)),
                     };
-                    if ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false)).clicked() {
+                    let resp = ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false));
+                    if resp.clicked() {
                         self.active = i;
+                    }
+                    if resp.double_clicked() {
+                        self.renaming = Some(tab.label());
                     }
                     if let Some(a) = tab.agent {
                         let cols = a.sprite(0).iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
