@@ -136,11 +136,11 @@ fn install_fonts(ctx: &egui::Context) {
         defs.families.entry(fam).or_default().insert(0, "meslo".into());
     }
     defs.families.insert(FontFamily::Name("bold".into()), vec!["meslo-bold".into(), "meslo".into()]);
-    // Except tab titles: Helvetica at weight 500, i.e. Helvetica Neue Medium (face 10 of the system .ttc).
+    // Except tab titles: the system font (SF, default weight 400), like iTerm.
     let mut tab = vec!["meslo".into()];
-    if let Ok(b) = std::fs::read("/System/Library/Fonts/HelveticaNeue.ttc") {
-        defs.font_data.insert("helvetica-500".into(), Arc::new(egui::FontData { index: 10, ..egui::FontData::from_owned(b) }));
-        tab.insert(0, "helvetica-500".into());
+    if let Ok(b) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
+        defs.font_data.insert("sf".into(), Arc::new(egui::FontData::from_owned(b)));
+        tab.insert(0, "sf".into());
     }
     defs.families.insert(FontFamily::Name("tab".into()), tab);
     ctx.set_fonts(defs);
