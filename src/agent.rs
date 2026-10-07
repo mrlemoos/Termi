@@ -81,7 +81,8 @@ impl Agent for Codex {
     fn busy_marks(&self) -> &'static [&'static str] { &["esc to interrupt"] }
     fn ask_marks(&self) -> &'static [&'static str] { &["Allow command", "Would you like to run", "approve"] }
     fn sprite(&self, f: usize) -> [&'static str; 3] {
-        [["╭──────╮", "│ >_   │", "╰──────╯"], ["╭──────╮", "│ >    │", "╰──────╯"]][f % 2]
+        // `>_` prompt, cursor blinks
+        [["█▙▖     ", " ▝██    ", "█▛▘ ▄▄▄ "], ["█▙▖     ", " ▝██    ", "█▛▘     "]][f % 2]
     }
 }
 
@@ -92,7 +93,8 @@ impl Agent for Grok {
     fn busy_marks(&self) -> &'static [&'static str] { &["esc to interrupt", "Thinking"] }
     fn ask_marks(&self) -> &'static [&'static str] { &["Allow", "(y/n)"] }
     fn sprite(&self, f: usize) -> [&'static str; 3] {
-        [[" ╭──╱╮ ", " │ ╱ │ ", " ╰╱──╯ "], [" ╭╲──╮ ", " │ ╲ │ ", " ╰──╲╯ "]][f % 2]
+        // ring with a slash, slash flips
+        [[" ▄▀▀▀▄ ▞", "█  ▞  █ ", "▞▀▄▄▄▀  "], ["▚ ▄▀▀▀▄ ", " █  ▚  █", "  ▀▄▄▄▀▚"]][f % 2]
     }
     // grok takes plain paths, no @-mentions
     fn file_ref(&self, path: &str) -> String {
@@ -108,7 +110,8 @@ impl Agent for Cursor {
     fn busy_marks(&self) -> &'static [&'static str] { &["ctrl+c to stop", "Generating"] }
     fn ask_marks(&self) -> &'static [&'static str] { &["Run this command?", "(y)"] }
     fn sprite(&self, f: usize) -> [&'static str; 3] {
-        [[" ▗▟█▙▖ ", " ▐█▀█▌ ", " ▝▜█▛▘ "], [" ▗▟█▙▖ ", " ▐█▄█▌ ", " ▝▜█▛▘ "]][f % 2]
+        // cube, shading swaps faces so it spins
+        [[" ▗▟▀▀▙▖ ", " ▐▓▓░░▌ ", " ▝▜▄▄▛▘ "], [" ▗▟▀▀▙▖ ", " ▐░░▓▓▌ ", " ▝▜▄▄▛▘ "]][f % 2]
     }
 }
 

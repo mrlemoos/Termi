@@ -2,6 +2,7 @@ use eframe::egui;
 
 mod agent;
 mod editor;
+mod settings;
 mod term;
 mod tree;
 
@@ -18,7 +19,6 @@ use term::{BG, Cell, FG, Fonts, Tab};
 const FONT_SIZE: f32 = 14.0;
 /// Height of the hidden titlebar strip: hover shows traffic lights, drag moves the window.
 const TITLEBAR: f32 = 28.0;
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 fn main() -> eframe::Result {
     alacritty_terminal::tty::setup_env();
@@ -43,6 +43,9 @@ struct App {
     tree: tree::Tree,
     show_tree: bool,
     editor: Option<Editor>,
+    settings: settings::Settings,
+    /// Some(cursor row) while the settings screen is open.
+    settings_open: Option<usize>,
     fonts: Fonts,
     lights: Option<bool>,
     window_drag: bool,
@@ -62,6 +65,7 @@ impl App {
 
         let mut app = App {
             tabs: Vec::new(), active: 0, next_id: 1, tree: Default::default(), show_tree: false, editor: None,
+            settings: settings::Settings::load(), settings_open: None,
             fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
         };
@@ -93,6 +97,9 @@ impl App {
         }
         if cmd(Key::W) {
             self.tabs.remove(self.active);
+        }
+        if cmd(Key::Comma) {
+            self.settings_open = if self.settings_open.is_some() { None } else { Some(0) };
         }
         if cmd(Key::B) {
             self.show_tree = !self.show_tree;
@@ -152,8 +159,10 @@ fn tilde(p: &Path) -> String {
     }
 }
 
-fn spinner() -> char {
-    SPINNER[epoch_ms() / 100 % SPINNER.len()]
+/// Grey ↔ white, 1.2s period: "this tab is working".
+fn pulse() -> Color32 {
+    let p = (epoch_ms() as f32 / 1200.0 * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+    Color32::from_gray((110.0 + 145.0 * p) as u8)
 }
 
 fn epoch_ms() -> usize {
@@ -178,7 +187,19 @@ impl eframe::App for App {
         }
         self.active = self.active.min(self.tabs.len() - 1);
         if self.last_poll.elapsed() > Duration::from_secs(1) {
+            let before: Vec<(State, bool)> = self.tabs.iter().map(|t| (t.state, t.done)).collect();
             self.tabs.iter_mut().for_each(Tab::poll);
+            let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+            for (i, (tab, (state, done))) in self.tabs.iter().zip(before).enumerate() {
+                if !self.settings.notifications || (focused && i == self.active) {
+                    continue;
+                }
+                if tab.state == State::NeedsInput && state != State::NeedsInput {
+                    settings::notify(&tab.label(), "needs your input");
+                } else if tab.done && !done {
+                    settings::notify(&tab.label(), "done");
+                }
+            }
             self.last_poll = Instant::now();
         }
 
@@ -202,14 +223,15 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let glyph = match (tab.agent.is_some(), tab.state, tab.done) {
-                        (true, State::Working, _) => format!("{} ", spinner()),
                         (true, State::NeedsInput, _) => "! ".into(),
                         (true, State::Idle, true) => "✓ ".into(),
                         _ => String::new(),
                     };
                     let mut text = egui::RichText::new(format!(" ⌘{} {glyph}{} ", i + 1, tab.label())).font(font.clone());
                     text = match (i == self.active, tab.state) {
+                        (true, State::Working) if tab.agent.is_some() => text.color(BG).background_color(pulse()),
                         (true, _) => text.color(BG).background_color(FG),
+                        (false, State::Working) if tab.agent.is_some() => text.color(pulse()),
                         (false, State::NeedsInput) => text.color(Color32::from_rgb(0xcd, 0xcd, 0x00)),
                         (false, State::Idle) if tab.done => text.color(Color32::from_rgb(0x00, 0xcd, 0x00)),
                         _ => text.color(Color32::from_gray(160)),
@@ -252,6 +274,13 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
+            if let Some(cursor) = &mut self.settings_open {
+                ui.add_space(TITLEBAR);
+                if !self.settings.show(ui, &font, cursor) {
+                    self.settings_open = None;
+                }
+                return;
+            }
             if let Some(ed) = &mut self.editor {
                 let tab = &self.tabs[self.active];
                 let shown = ed.path.strip_prefix(&tab.cwd).unwrap_or(&ed.path).to_string_lossy().into_owned();
@@ -279,7 +308,7 @@ impl eframe::App for App {
         }
 
         let busy = self.tabs.iter().any(|t| t.agent.is_some() && t.state == State::Working);
-        ctx.request_repaint_after(Duration::from_millis(if busy { 100 } else { 1000 }));
+        ctx.request_repaint_after(Duration::from_millis(if busy { 33 } else { 1000 }));
     }
 }
 

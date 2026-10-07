@@ -8,6 +8,7 @@ macOS terminal for coding agents. No chrome: traffic lights only appear when you
 | ⌘1…⌘9 | jump to tab (the status line always shows them) |
 | ⌘B | file tree. Click a file to open it, drag it onto the terminal to insert `@path` |
 | ⌘C / ⌘V | copy selection / paste |
+| ⌘, | settings (↑↓ move, space toggle, esc close). Saved to `~/.config/termi/settings` |
 
 **Editor:** ⌘S saves. ⌘' (or clicking a line number) adds a note to that line. ⌘↵ pastes every note into the agent as a review prompt. Esc closes.
 
