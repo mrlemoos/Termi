@@ -31,7 +31,9 @@ fn main() -> eframe::Result {
         .with_inner_size([1000.0, 640.0])
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
-        .with_title_shown(false);
+        .with_title_shown(false)
+        // eframe sets the Dock icon at runtime (egui logo by default), overriding the bundle's Termi.icns.
+        .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/termi-icon.png")).expect("valid icon png"));
     eframe::run_native(
         "Termi",
         eframe::NativeOptions { viewport, ..Default::default() },
