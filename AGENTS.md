@@ -8,6 +8,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): 
 - Scope is optional and is usually the module: `term`, `agent`, `tree`, `editor`, `ui`.
 - Summary: imperative mood, lowercase, no trailing period, at most 72 characters.
 - Breaking change: add `!` after the type/scope and a `BREAKING CHANGE:` footer.
+- Commit and push straight to `main`. No feature branches or PRs unless asked.
 
 ## Code
 
