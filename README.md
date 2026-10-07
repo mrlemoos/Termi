@@ -1,10 +1,14 @@
 <h1 align="center">Termi</h1>
 
+<p align="center"><a href="https://mrlemoos.dev/termi">mrlemoos.dev/termi</a></p>
+
 <p align="center"><img src="assets/screenshot.png" alt="Termi window" width="800"></p>
 
 macOS terminal for coding agents. No chrome: traffic lights only appear when you hover the top edge.
 
 ## Install
+
+Download the app from [mrlemoos.dev/termi](https://mrlemoos.dev/termi), or use Homebrew:
 
 ```sh
 brew tap mrlemoos/termi https://github.com/mrlemoos/Termi
