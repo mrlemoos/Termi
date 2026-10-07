@@ -1,4 +1,6 @@
-# Termi
+<h1 align="center">Termi</h1>
+
+<p align="center"><img src="assets/screenshot.png" alt="Termi window" width="800"></p>
 
 macOS terminal for coding agents. No chrome: traffic lights only appear when you hover the top edge.
 
