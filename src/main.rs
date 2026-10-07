@@ -170,6 +170,11 @@ fn epoch_ms() -> usize {
 }
 
 impl eframe::App for App {
+    /// Unpainted areas are the terminal background, not eframe's default grey.
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        BG.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         for t in &mut self.tabs {
@@ -218,7 +223,7 @@ impl eframe::App for App {
         let font = self.fonts.regular.clone();
 
         // ---- status line: ⌘n badges, tmux style ----
-        egui::Panel::bottom("status").exact_size(cell.h).frame(egui::Frame::NONE.fill(Color32::from_gray(24))).show(ui, |ui| {
+        egui::Panel::bottom("status").exact_size(cell.h).show_separator_line(false).frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             ui.horizontal(|ui| {
                 for (i, tab) in self.tabs.iter().enumerate() {
