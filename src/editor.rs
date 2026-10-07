@@ -152,4 +152,22 @@ mod tests {
         let notes = [(2, "rename".to_string())].into_iter().collect();
         assert_eq!(super::review("a.rs", "fn a() {\n    let x = 1;\n}", &notes), "Review comments on a.rs:\n- a.rs:2 `let x = 1;` — rename\n");
     }
+
+    #[test]
+    fn review_orders_notes_and_survives_shifted_lines() {
+        // a note past the end (lines deleted after it was written) keeps its line number, empty code
+        let notes = [(9, "gone".to_string()), (1, "first".to_string())].into_iter().collect();
+        assert_eq!(super::review("b", "x", &notes), "Review comments on b:\n- b:1 `x` — first\n- b:9 `` — gone\n");
+    }
+
+    #[test]
+    fn open_reads_file_clean() {
+        let p = std::env::temp_dir().join(format!("termi-editor-{}", std::process::id()));
+        std::fs::write(&p, "hi\n").unwrap();
+        let ed = super::Editor::open(p.clone()).unwrap();
+        assert_eq!(ed.text, "hi\n");
+        assert!(!ed.dirty());
+        std::fs::remove_file(&p).unwrap();
+        assert!(super::Editor::open(p).is_err());
+    }
 }

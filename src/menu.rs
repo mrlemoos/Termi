@@ -95,3 +95,31 @@ pub fn take() -> Vec<egui::Event> {
         .flat_map(|key| [true, false].map(|pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_replays_cmd_key_press_and_release() {
+        PENDING.lock().unwrap().extend([Key::T, Key::W]);
+        let got: Vec<(Key, bool, bool)> = take()
+            .into_iter()
+            .map(|e| match e {
+                egui::Event::Key { key, pressed, modifiers, .. } => (key, pressed, modifiers.command && modifiers.mac_cmd),
+                _ => panic!("not a key event"),
+            })
+            .collect();
+        assert_eq!(got, [(Key::T, true, true), (Key::T, false, true), (Key::W, true, true), (Key::W, false, true)]);
+        assert!(take().is_empty());
+    }
+
+    #[test]
+    fn items_have_unique_shortcuts() {
+        for (i, a) in ITEMS.iter().enumerate() {
+            for b in &ITEMS[i + 1..] {
+                assert!(a.2 != b.2 && a.3 != b.3, "{} and {} share a shortcut", a.1, b.1);
+            }
+        }
+    }
+}

@@ -634,6 +634,24 @@ mod tests {
         assert_eq!(buf, "zs!");
         assert_eq!(rename_key(&mut buf, &key(Key::Enter)), Some(true));
         assert_eq!(rename_key(&mut buf, &key(Key::Escape)), Some(false));
+        // a multi-line paste only keeps its first line
+        assert_eq!(rename_key(&mut buf, &egui::Event::Paste("ab\ncd".into())), None);
+        assert_eq!(buf, "zs!ab");
+        let release = egui::Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+        assert_eq!(rename_key(&mut buf, &release), None);
+    }
+
+    #[test]
+    fn tilde_shortens_home() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(tilde(&Path::new(&home).join("src")), "~/src");
+        assert_eq!(tilde(Path::new("/tmp")), "/tmp");
+    }
+
+    #[test]
+    fn pane_ids_differ_per_tab() {
+        assert_ne!(pane_id(1), pane_id(2));
+        assert_eq!(pane_id(1), pane_id(1));
     }
 
     /// Visual tests: the ⌘, screen rendered in every theme and font. `UPDATE_SNAPSHOTS=1 cargo test` to re-record.

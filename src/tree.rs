@@ -207,4 +207,27 @@ mod tests {
         assert_eq!(step(&rows, &mut open, 0, Move::Up), (0, None));
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn hides_git_and_toggles() {
+        use super::{Move, step};
+        let dir = std::env::temp_dir().join(format!("termi-tree-toggle-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        std::fs::write(dir.join(".DS_Store"), "").unwrap();
+        std::fs::write(dir.join("f"), "").unwrap();
+        let mut open = Default::default();
+        let rows = super::rows(&dir, &open);
+        assert_eq!(rows.iter().map(|r| r.path.clone()).collect::<Vec<_>>(), [dir.join("d"), dir.join("f")]);
+        assert_eq!(step(&rows, &mut open, 0, Move::Toggle), (0, None));
+        assert!(open.contains(&dir.join("d")));
+        let rows = super::rows(&dir, &open);
+        assert!(rows[0].open);
+        assert_eq!(step(&rows, &mut open, 0, Move::Toggle), (0, None));
+        assert!(open.is_empty());
+        assert_eq!(step(&rows, &mut open, 1, Move::Toggle), (1, Some(dir.join("f"))));
+        // out of range (rows shrank under the selection) resets to the top
+        assert_eq!(step(&[], &mut open, 3, Move::Down), (0, None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

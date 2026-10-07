@@ -508,4 +508,52 @@ mod tests {
         assert_eq!(index_color(231), Color32::WHITE);
         assert_eq!(index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize), background());
     }
+
+    #[test]
+    fn more_keys() {
+        let (none, shift, alt) = (Modifiers::NONE, Modifiers::SHIFT, Modifiers::ALT);
+        let b = |k, m| key_bytes(k, m, false).map(|b| b.into_owned());
+        assert_eq!(b(Key::Enter, none).unwrap(), b"\r");
+        assert_eq!(b(Key::Enter, shift).unwrap(), b"\x1b\r");
+        assert_eq!(b(Key::Tab, shift).unwrap(), b"\x1b[Z");
+        assert_eq!(b(Key::Backspace, none).unwrap(), b"\x7f");
+        assert_eq!(b(Key::Backspace, alt).unwrap(), b"\x1b\x7f");
+        assert_eq!(b(Key::ArrowLeft, alt).unwrap(), b"\x1bb");
+        assert_eq!(b(Key::ArrowRight, alt).unwrap(), b"\x1bf");
+        assert_eq!(b(Key::Delete, none).unwrap(), b"\x1b[3~");
+        assert_eq!(b(Key::A, Modifiers::CTRL).unwrap(), b"\x01");
+        assert_eq!(b(Key::Z, Modifiers::CTRL).unwrap(), b"\x1a");
+        // ctrl + a non-letter falls through to the plain mapping
+        assert_eq!(b(Key::Escape, Modifiers::CTRL).unwrap(), b"\x1b");
+    }
+
+    #[test]
+    fn grid_and_names() {
+        assert_eq!(grid_size(vec2(100.0, 50.0), &Cell { w: 8.0, h: 16.0 }), (12, 3));
+        assert_eq!(hex(0x123456), Color32::from_rgb(0x12, 0x34, 0x56));
+        // cut on char boundaries, not bytes
+        assert_eq!(session_name("ééééééééééééééééééééééééééé", "x").as_deref(), Some("éééééééééééééééééééééééé…"));
+    }
+
+    #[test]
+    fn themes_and_palette() {
+        use alacritty_terminal::term::color::Colors;
+        use alacritty_terminal::vte::ansi::NamedColor;
+        let _theme = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_theme("gruvbox");
+        assert_eq!(background(), hex(0x282828));
+        assert_eq!(index_color(1), hex(0xcc241d));
+        // bold-is-bright for the first 8, not for true colour
+        let colors = Colors::default();
+        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors, true), hex(0xfb4934));
+        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors, false), hex(0xcc241d));
+        assert_eq!(resolve(Color::Spec(Rgb { r: 1, g: 2, b: 3 }), &colors, true), Color32::from_rgb(1, 2, 3));
+        set_theme("nope");
+        assert_eq!(theme().name, "xterm");
+        assert_eq!(index_color(232), Color32::from_gray(8));
+        assert_eq!(index_color(255), Color32::from_gray(238));
+        assert_eq!(index_color(NamedColor::DimRed as usize), dim(hex(0xcd0000)));
+        assert_eq!(index_color(NamedColor::Foreground as usize), foreground());
+        assert_eq!(to_rgb(Color32::from_rgb(1, 2, 3)), Rgb { r: 1, g: 2, b: 3 });
+    }
 }

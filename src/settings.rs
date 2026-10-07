@@ -256,5 +256,23 @@ mod tests {
         assert_eq!(s.shown(0), "[x]");
         assert_eq!(s.shown(1), "‹ 14 ›");
         assert_eq!(s.shown(4), "‹ login shell ›");
+        let s = Settings { notifications: false, shell: "/bin/zsh".into(), ..s };
+        assert_eq!(s.shown(0), "[ ]");
+        assert_eq!(s.shown(2), "‹ Meslo ›");
+        assert_eq!(s.shown(4), "‹ /bin/zsh ›");
+    }
+
+    #[test]
+    fn parse_trims_and_keeps_values_with_equals() {
+        let s = Settings::parse("  theme = gruvbox \nshell=/bin/env a=b\n");
+        assert_eq!(s.theme, "gruvbox");
+        assert_eq!(s.shell, "/bin/env a=b");
+    }
+
+    #[test]
+    fn options_only_for_list_rows() {
+        assert!(Settings::options(0).is_empty() && Settings::options(1).is_empty());
+        assert_eq!(Settings::options(3), term::THEMES.map(|t| t.name.to_string()));
+        assert!(Settings::options(4).iter().skip(1).all(|s| s.starts_with('/')));
     }
 }

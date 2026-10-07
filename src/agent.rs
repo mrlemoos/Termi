@@ -172,4 +172,63 @@ mod tests {
         assert_eq!(c.file_ref("src/a.rs"), "@src/a.rs ");
         assert_eq!(detect("grok").unwrap().file_ref("my dir/a.rs"), "'my dir/a.rs' ");
     }
+
+    #[test]
+    fn runs_matches_exe_or_js_script() {
+        assert!(runs("bun /x/codex/cli.js", "codex"));
+        assert!(!runs("deno run main.ts", "grok"));
+        assert!(!runs("node", "claude"));
+        assert!(!runs("", "claude"));
+        assert!(runs("claude-dev --x", "claude"));
+        assert!(!runs("/usr/bin/vim claude", "claude"));
+    }
+
+    #[test]
+    fn shell_quote_only_when_needed() {
+        assert_eq!(shell_quote("a/b.rs"), "a/b.rs ");
+        assert_eq!(shell_quote("it's"), r"'it'\''s' ");
+        assert_eq!(shell_quote("$HOME"), "'$HOME' ");
+    }
+
+    #[test]
+    fn other_agents_read_screen() {
+        let get = |n| AGENTS.iter().copied().find(|a| a.name() == n).unwrap();
+        assert_eq!(get("codex").read_screen("Allow command? esc to interrupt"), Some(State::NeedsInput));
+        assert_eq!(get("codex").read_screen("working (esc to interrupt)"), Some(State::Working));
+        assert_eq!(get("grok").read_screen("Thinking"), Some(State::Working));
+        assert_eq!(get("grok").read_screen("run it? (y/n)"), Some(State::NeedsInput));
+        assert_eq!(get("cursor").read_screen("Generating"), Some(State::Working));
+        assert_eq!(get("cursor").read_screen("Run this command?"), Some(State::NeedsInput));
+        assert_eq!(get("cursor").read_screen("$ "), None);
+    }
+
+    #[test]
+    fn sprite_frames_line_up() {
+        // the status line squeezes 3 rows into one cell row, so every row must be the same width
+        for a in AGENTS {
+            let w = a.sprite(0)[0].chars().count();
+            for f in 0..3 {
+                assert!(a.sprite(f).iter().all(|l| l.chars().count() == w), "{} frame {f}", a.name());
+            }
+        }
+    }
+
+    #[test]
+    fn hook_state_backs_up_screen() {
+        // pid-based id so parallel test runs don't share a file
+        let tab = u64::MAX - std::process::id() as u64;
+        let file = state_dir().join(tab.to_string());
+        std::fs::create_dir_all(state_dir()).unwrap();
+        let claude = detect("claude").unwrap();
+        for (text, want) in [("working\n", Some(State::Working)), ("input", Some(State::NeedsInput)), ("idle", Some(State::Idle)), ("??", None)] {
+            std::fs::write(&file, text).unwrap();
+            assert_eq!(hook_state(tab), want);
+        }
+        std::fs::write(&file, "working").unwrap();
+        assert_eq!(resolve(claude, "", tab), State::Working);
+        assert_eq!(resolve(claude, "Do you want to", tab), State::NeedsInput);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(hook_state(tab), None);
+        assert_eq!(resolve(claude, "", tab), State::Idle);
+    }
 }

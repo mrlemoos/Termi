@@ -99,4 +99,21 @@ mod tests {
         assert_eq!(l.clone().retain(&|id| id != 2).map(|l| origins(&l)), Some(vec![(1, 0.0, 0.0), (3, 50.0, 0.0)]));
         assert_eq!(l.retain(&|_| false), None);
     }
+
+    #[test]
+    fn split_unknown_leaf_is_noop_and_before_goes_first() {
+        assert_eq!(Layout::Leaf(1).split(9, 2, true, false), Layout::Leaf(1));
+        let l = Layout::Leaf(1).split(1, 2, false, true);
+        assert_eq!(l, Layout::Split { side_by_side: false, a: Box::new(Layout::Leaf(2)), b: Box::new(Layout::Leaf(1)) });
+        assert!(Layout::Leaf(1).dividers(Rect::from_min_max(pos2(0.0, 0.0), pos2(10.0, 10.0)), (1.0, 1.0)).is_empty());
+    }
+
+    #[test]
+    fn halves_snap_to_cells() {
+        let r = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 50.0));
+        let (a, b) = halves(r, true, (8.0, 16.0));
+        assert_eq!((a.max.x, b.min.x), (48.0, 48.0));
+        let (a, b) = halves(r, false, (8.0, 16.0));
+        assert_eq!((a.max.y, b.min.y), (32.0, 32.0));
+    }
 }
