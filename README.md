@@ -57,4 +57,6 @@ Claude Code example (`~/.claude/settings.json`):
 
 ## License
 
+Apache 2.0, see `LICENSE`.
+
 The MesloLGS Nerd Font Mono is compiled into the binary (Apache 2.0, see `assets/MESLO-LICENSE.txt`).
