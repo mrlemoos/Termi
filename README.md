@@ -49,7 +49,8 @@ Claude Code example (`~/.claude/settings.json`):
 ## Build
 
 - Dev: `cargo run`
-- Release: `scripts/bundle.sh` builds `dist/Termi.app` and `dist/Termi.zip`, then stamps the version and sha256 into `Casks/termi.rb`. Upload the zip to GitHub release `v<version>`.
+- Release: every push to `main` runs tests and builds an Apple Silicon app, publishes `Termi.zip` to a GitHub production release, and commits its version and SHA-256 to `Casks/termi.rb`. The version uses Cargo's major/minor and adds the workflow run number to its patch. The cask update uses GitHub's token, so it does not trigger another release. Failed runs can be rerun from Actions.
+- Local bundle: `sh scripts/bundle.sh` builds `dist/Termi.app` and `dist/Termi.zip`, then updates `Casks/termi.rb`. Set `RELEASE_VERSION` to override the Cargo version.
 
 ## License
 

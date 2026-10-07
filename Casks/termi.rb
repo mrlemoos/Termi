@@ -8,6 +8,7 @@ cask "termi" do
   homepage "https://github.com/mrlemoos/Termi"
 
   depends_on macos: ">= :big_sur"
+  depends_on arch: :arm64
 
   app "Termi.app"
 end
