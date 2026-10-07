@@ -7,7 +7,7 @@ cask "termi" do
   desc "Chromeless terminal for coding agents"
   homepage "https://github.com/mrlemoos/Termi"
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
   depends_on arch: :arm64
 
   app "Termi.app"
