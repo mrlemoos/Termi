@@ -42,6 +42,8 @@ struct App {
     next_id: u64,
     tree: tree::Tree,
     show_tree: bool,
+    /// Keys go to the tree instead of the terminal/editor.
+    tree_focus: bool,
     editor: Option<Editor>,
     settings: settings::Settings,
     /// Some(cursor row) while the settings screen is open.
@@ -64,7 +66,7 @@ impl App {
         ctx.set_visuals(visuals);
 
         let mut app = App {
-            tabs: Vec::new(), active: 0, next_id: 1, tree: Default::default(), show_tree: false, editor: None,
+            tabs: Vec::new(), active: 0, next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
             settings: settings::Settings::load(), settings_open: None,
             fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
@@ -103,6 +105,10 @@ impl App {
         }
         if cmd(Key::B) {
             self.show_tree = !self.show_tree;
+            self.tree_focus = self.show_tree;
+        }
+        if self.show_tree && cmd(Key::ArrowRight) {
+            self.tree_focus = true;
         }
         let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
         for (i, k) in nums.into_iter().enumerate() {
@@ -268,7 +274,7 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                        if let Some(tree::Action::Open(p)) = self.tree.show(ui, &cwd, &font) {
+                        if let Some(tree::Action::Open(p)) = self.tree.show(ui, &cwd, &font, &mut self.tree_focus) {
                             match Editor::open(p) {
                                 Ok(ed) => self.editor = Some(ed),
                                 Err(e) => eprintln!("termi: {e}"),
@@ -278,7 +284,7 @@ impl eframe::App for App {
                 });
         }
 
-        egui::CentralPanel::no_frame().show(ui, |ui| {
+        let central = egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(cursor) = &mut self.settings_open {
                 ui.add_space(TITLEBAR);
                 if !self.settings.show(ui, &font, cursor) {
@@ -302,6 +308,9 @@ impl eframe::App for App {
             }
             self.terminal(ui, &ctx, &cell, show);
         });
+        if central.response.contains_pointer() && ctx.input(|i| i.pointer.any_pressed()) {
+            self.tree_focus = false;
+        }
 
         // drag preview for tree → prompt
         if let (Some(path), Some(pos)) = (egui::DragAndDrop::payload::<PathBuf>(&ctx), ctx.pointer_hover_pos()) {
