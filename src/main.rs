@@ -56,6 +56,8 @@ struct App {
     settings_open: Option<usize>,
     /// Some(draft name) while renaming the active tab.
     renaming: Option<String>,
+    /// Tab id of the pane being ⌘-dragged.
+    pane_drag: Option<u64>,
     fonts: Fonts,
     lights: Option<bool>,
     window_drag: bool,
@@ -77,7 +79,7 @@ impl App {
 
         let mut app = App {
             tabs: Vec::new(), active: 0, screens: Vec::new(), next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
-            settings: settings::Settings::load(), settings_open: None, renaming: None,
+            settings: settings::Settings::load(), settings_open: None, renaming: None, pane_drag: None,
             fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
         };
@@ -93,7 +95,7 @@ impl App {
                 match (split, self.tabs.get(self.active)) {
                     (Some(side), Some(at)) => {
                         let at = at.id;
-                        self.screens = std::mem::take(&mut self.screens).into_iter().map(|l| l.split(at, tab.id, side)).collect();
+                        self.screens = std::mem::take(&mut self.screens).into_iter().map(|l| l.split(at, tab.id, side, false)).collect();
                     }
                     _ => self.screens.push(Layout::Leaf(tab.id)),
                 }
@@ -394,20 +396,60 @@ impl eframe::App for App {
             }
             let area = ui.available_rect_before_wrap();
             let active = self.tabs[self.active].id;
-            let screen = self.screens.iter().find(|l| l.contains(active)).cloned().unwrap_or(Layout::Leaf(active));
-            let panes = screen.rects(area, (cell.w, cell.h));
+            let si = self.screens.iter().position(|l| l.contains(active));
+            let screen = si.map_or(Layout::Leaf(active), |si| self.screens[si].clone());
+            let snap = (cell.w, cell.h);
+            let panes = screen.rects(area, snap);
             let ids: Vec<egui::Id> = panes.iter().map(|&(id, _)| pane_id(id)).collect();
             for &(id, r) in &panes {
                 let Some(i) = self.tabs.iter().position(|t| t.id == id) else { continue };
                 self.terminal(ui, &ctx, &cell, show, i, r, r.min.y <= area.min.y, &ids);
-                // divider on the shared edge, a box-drawing hairline
-                let line = egui::Stroke::new(1.0, Color32::from_gray(70));
-                if r.max.x < area.max.x {
-                    ui.painter().vline(r.max.x, r.y_range(), line);
+            }
+            // ⌘ held: the whole screen grabs the mouse; drag a pane onto another's edge to re-split it there.
+            // Without ⌘ the panes keep the mouse for text selection.
+            let grab_id = egui::Id::new("pane-grab");
+            let under = |p: Option<Pos2>| p.and_then(|p| panes.iter().find(|(_, r)| r.contains(p)).copied());
+            if panes.len() > 1 && (ctx.input(|i| i.modifiers.command) || ctx.is_being_dragged(grab_id)) {
+                let resp = ui.interact(area, grab_id, Sense::drag());
+                let target = under(ctx.pointer_hover_pos());
+                if resp.drag_started() {
+                    self.pane_drag = under(ctx.input(|i| i.pointer.press_origin())).map(|(id, _)| id);
                 }
-                if r.max.y < area.max.y {
-                    ui.painter().hline(r.x_range(), r.max.y, line);
+                let outline = |r: egui::Rect, c| ui.painter().rect_stroke(r.shrink(1.0), 0.0, egui::Stroke::new(2.0, c), egui::StrokeKind::Inside);
+                match self.pane_drag.filter(|_| resp.dragged() || resp.drag_stopped()) {
+                    Some(src) => {
+                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        if let Some((_, r)) = panes.iter().find(|(id, _)| *id == src) {
+                            outline(*r, Color32::from_gray(90));
+                        }
+                        if let (Some((dst, r)), Some(p)) = (target.filter(|(dst, _)| *dst != src), ctx.pointer_hover_pos()) {
+                            // the edge of the target nearest the pointer
+                            let d = (p - r.center()) / r.size();
+                            let (side, before) = if d.x.abs() > d.y.abs() { (true, d.x < 0.0) } else { (false, d.y < 0.0) };
+                            let after = screen.clone().moved(src, dst, side, before);
+                            // preview where src lands, in terminal bright blue
+                            if let Some((_, land)) = after.rects(area, snap).into_iter().find(|(id, _)| *id == src) {
+                                ui.painter().rect_filled(land, 0.0, Color32::from_rgba_unmultiplied(0x5c, 0x5c, 0xff, 40));
+                                outline(land, Color32::from_rgb(0x5c, 0x5c, 0xff));
+                            }
+                            if let (true, Some(si)) = (resp.drag_stopped(), si) {
+                                self.screens[si] = after;
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            self.pane_drag = None;
+                        }
+                    }
+                    None => {
+                        ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                        if let Some((_, r)) = target {
+                            outline(r, FG);
+                        }
+                    }
                 }
+            }
+            for d in screen.dividers(area, snap) {
+                ui.painter().line_segment(d, egui::Stroke::new(1.0, Color32::from_gray(70)));
             }
         });
         if central.response.contains_pointer() && ctx.input(|i| i.pointer.any_pressed()) {
