@@ -13,6 +13,8 @@ use objc2_foundation::{NSObject, NSString};
 const ITEMS: &[(&str, &str, &str, Key)] = &[
     ("", "Settings…", ",", Key::Comma),
     ("Shell", "New Tab", "t", Key::T),
+    ("Shell", "Split Vertically", "\\", Key::Backslash),
+    ("Shell", "Split Horizontally", "|", Key::Pipe),
     ("Shell", "Close Tab", "w", Key::W),
     ("Shell", "Rename Tab", "r", Key::R),
     ("View", "Toggle Tree", "b", Key::B),

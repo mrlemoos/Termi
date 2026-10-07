@@ -5,6 +5,7 @@ mod editor;
 #[cfg(target_os = "macos")]
 mod menu;
 mod settings;
+mod split;
 mod term;
 mod tree;
 
@@ -16,6 +17,7 @@ use egui::{Color32, FontFamily, FontId, Key, Modifiers, Pos2, Sense, vec2};
 
 use agent::State;
 use editor::{Editor, Outcome};
+use split::Layout;
 use term::{BG, Cell, FG, Fonts, Tab};
 
 const FONT_SIZE: f32 = 14.0;
@@ -41,6 +43,8 @@ fn main() -> eframe::Result {
 struct App {
     tabs: Vec<Tab>,
     active: usize,
+    /// One per screen; ⌘n shows the screen holding tab n.
+    screens: Vec<Layout>,
     next_id: u64,
     tree: tree::Tree,
     show_tree: bool,
@@ -72,19 +76,27 @@ impl App {
         ctx.set_visuals(visuals);
 
         let mut app = App {
-            tabs: Vec::new(), active: 0, next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
+            tabs: Vec::new(), active: 0, screens: Vec::new(), next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
             settings: settings::Settings::load(), settings_open: None, renaming: None,
             fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
         };
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
-        app.new_tab(ctx, std::env::current_dir().ok().filter(|d| d != Path::new("/")).unwrap_or(home));
+        app.new_tab(ctx, std::env::current_dir().ok().filter(|d| d != Path::new("/")).unwrap_or(home), None);
         app
     }
 
-    fn new_tab(&mut self, ctx: &egui::Context, cwd: PathBuf) {
+    /// `split`: Some(side_by_side) splits the active pane, None opens a new screen.
+    fn new_tab(&mut self, ctx: &egui::Context, cwd: PathBuf, split: Option<bool>) {
         match Tab::spawn(self.next_id, cwd, ctx) {
             Ok(tab) => {
+                match (split, self.tabs.get(self.active)) {
+                    (Some(side), Some(at)) => {
+                        let at = at.id;
+                        self.screens = std::mem::take(&mut self.screens).into_iter().map(|l| l.split(at, tab.id, side)).collect();
+                    }
+                    _ => self.screens.push(Layout::Leaf(tab.id)),
+                }
                 self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
                 self.next_id += 1;
@@ -116,9 +128,19 @@ impl App {
         if cmd(Key::R) {
             self.renaming = Some(self.tabs[self.active].label());
         }
-        if cmd(Key::T) {
+        // ⌘⇧\ before ⌘\: consume_key ignores extra shift
+        let split = if cmd(Key::Pipe) || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Backslash)) {
+            Some(Some(false))
+        } else if cmd(Key::Backslash) {
+            Some(Some(true))
+        } else if cmd(Key::T) {
+            Some(None)
+        } else {
+            None
+        };
+        if let Some(split) = split {
             let cwd = self.tabs[self.active].cwd.clone();
-            self.new_tab(ctx, cwd);
+            self.new_tab(ctx, cwd, split);
         }
         if cmd(Key::W) {
             self.tabs.remove(self.active);
@@ -249,6 +271,8 @@ impl eframe::App for App {
             return;
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        let alive: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+        self.screens = std::mem::take(&mut self.screens).into_iter().filter_map(|l| l.retain(&|id| alive.contains(&id))).collect();
         if self.last_poll.elapsed() > Duration::from_secs(1) {
             let before: Vec<(State, bool)> = self.tabs.iter().map(|t| (t.state, t.done)).collect();
             self.tabs.iter_mut().for_each(Tab::poll);
@@ -364,7 +388,23 @@ impl eframe::App for App {
                 }
                 return;
             }
-            self.terminal(ui, &ctx, &cell, show);
+            let area = ui.available_rect_before_wrap();
+            let active = self.tabs[self.active].id;
+            let screen = self.screens.iter().find(|l| l.contains(active)).cloned().unwrap_or(Layout::Leaf(active));
+            let panes = screen.rects(area, (cell.w, cell.h));
+            let ids: Vec<egui::Id> = panes.iter().map(|&(id, _)| pane_id(id)).collect();
+            for &(id, r) in &panes {
+                let Some(i) = self.tabs.iter().position(|t| t.id == id) else { continue };
+                self.terminal(ui, &ctx, &cell, show, i, r, r.min.y <= area.min.y, &ids);
+                // divider on the shared edge, a box-drawing hairline
+                let line = egui::Stroke::new(1.0, Color32::from_gray(70));
+                if r.max.x < area.max.x {
+                    ui.painter().vline(r.max.x, r.y_range(), line);
+                }
+                if r.max.y < area.max.y {
+                    ui.painter().hline(r.x_range(), r.max.y, line);
+                }
+            }
         });
         if central.response.contains_pointer() && ctx.input(|i| i.pointer.any_pressed()) {
             self.tree_focus = false;
@@ -385,15 +425,21 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn terminal(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, cell: &Cell, lights: bool) {
-        let rect = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let origin = rect.min + vec2(4.0, TITLEBAR);
-        let tab = &mut self.tabs[self.active];
-        let (cols, rows) = term::grid_size(rect.size() - vec2(8.0, TITLEBAR), cell);
+    /// One pane: tab `i` in `rect`. `top` panes leave room for the titlebar; `panes` are the screen's pane ids.
+    fn terminal(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, cell: &Cell, lights: bool, i: usize, rect: egui::Rect, top: bool, panes: &[egui::Id]) {
+        let resp = ui.interact(rect, pane_id(self.tabs[i].id), Sense::click_and_drag());
+        if resp.clicked() || resp.drag_started() {
+            self.active = i;
+        }
+        let pad = if top { TITLEBAR } else { 4.0 };
+        let origin = rect.min + vec2(4.0, pad);
+        let is_active = i == self.active;
+        let tab = &mut self.tabs[i];
+        let (cols, rows) = term::grid_size(rect.size() - vec2(8.0, pad), cell);
         tab.resize(cols, rows, cell);
 
-        if ui.memory(|m| m.focused().is_none()) || resp.clicked() {
+        // focus follows the active pane, unless something else (not a pane) holds it
+        if is_active && (resp.clicked() || ui.memory(|m| m.focused().is_none_or(|f| f != resp.id && panes.contains(&f)))) {
             resp.request_focus();
         }
         let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
@@ -459,8 +505,10 @@ impl App {
         if let Some(path) = resp.dnd_release_payload::<PathBuf>() {
             tab.paste_raw(&file_ref(tab, &path));
         }
-        for f in ctx.input(|i| i.raw.dropped_files.clone()) {
-            tab.paste_raw(&file_ref(tab, f.path()));
+        if is_active {
+            for f in ctx.input(|i| i.raw.dropped_files.clone()) {
+                tab.paste_raw(&file_ref(tab, f.path()));
+            }
         }
 
         let painter = ui.painter_at(rect);
@@ -470,6 +518,10 @@ impl App {
             painter.rect_stroke(rect.shrink(1.0), 0.0, egui::Stroke::new(1.0, FG), egui::StrokeKind::Inside);
         }
     }
+}
+
+fn pane_id(tab: u64) -> egui::Id {
+    egui::Id::new(("pane", tab))
 }
 
 /// Tamagotchi: the 3-row sprite squeezed into one status-line row. Walks while working.
