@@ -110,6 +110,9 @@ impl App {
         if self.show_tree && cmd(Key::ArrowRight) {
             self.tree_focus = true;
         }
+        if self.tree_focus && cmd(Key::ArrowLeft) {
+            self.tree_focus = false;
+        }
         let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
         for (i, k) in nums.into_iter().enumerate() {
             if cmd(k) && i < self.tabs.len() {
