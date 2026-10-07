@@ -99,7 +99,9 @@ impl Tree {
             self.stamp = Some(Instant::now());
         }
         let name = root.file_name().map_or("/".into(), |n| n.to_string_lossy().into_owned());
-        ui.label(egui::RichText::new(format!(" {name}")).font(font.clone()).color(crate::term::foreground()).strong());
+        // names in the tab-title font (SF); prefix and icon stay monospace so the tree lines align
+        let tab = egui::FontId::new(font.size + 1.0, egui::FontFamily::Name("tab".into()));
+        ui.label(egui::RichText::new(format!(" {name}")).font(tab.clone()).color(crate::term::foreground()));
 
         let mut action = None;
         let mut toggle = None;
@@ -142,11 +144,16 @@ impl Tree {
             let file = row.path.file_name().unwrap_or_default().to_string_lossy();
             let icon = match (row.dir, row.open) { (true, true) => "", (true, false) => "", _ => "" };
             let color = if row.dir { egui::Color32::from_rgb(0x5c, 0x5c, 0xff) } else { crate::term::foreground() };
-            let mut text = egui::RichText::new(format!("{}{icon} {file}", row.prefix)).font(font.clone()).color(color);
-            if i == sel {
-                // block cursor when focused, dim bar when not: like a tmux copy-mode selection
-                text = if *focused { text.color(crate::term::background()).background_color(crate::term::foreground()) } else { text.background_color(egui::Color32::from_gray(50)) };
-            }
+            // block cursor when focused, dim bar when not: like a tmux copy-mode selection
+            let (fg, bg) = match (i == sel, *focused) {
+                (true, true) => (crate::term::background(), crate::term::foreground()),
+                (true, false) => (color, egui::Color32::from_gray(50)),
+                _ => (color, egui::Color32::TRANSPARENT),
+            };
+            let fmt = |f: &egui::FontId| egui::TextFormat { font_id: f.clone(), color: fg, background: bg, valign: egui::Align::Center, ..Default::default() };
+            let mut text = egui::text::LayoutJob::default();
+            text.append(&format!("{}{icon} ", row.prefix), 0.0, fmt(font));
+            text.append(&file, 0.0, fmt(&tab));
             let resp = ui.add(egui::Label::new(text).sense(egui::Sense::click_and_drag()).selectable(false).truncate());
             resp.dnd_set_drag_payload(row.path.clone());
             if i == sel && moved {
