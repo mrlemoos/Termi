@@ -22,7 +22,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-codesign --force --deep -s - "$APP"
+if [ -n "${SIGNING_IDENTITY:-}" ]; then
+  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP"
+else
+  codesign --force --sign - "$APP"
+fi
+codesign --verify --strict --verbose=2 "$APP"
 (cd dist && rm -f Termi.zip && zip -qry Termi.zip Termi.app)
 SHA=$(shasum -a 256 dist/Termi.zip | cut -d' ' -f1)
 sed -i '' -e "s/version \".*\"/version \"$VERSION\"/" -e "s/sha256 \".*\"/sha256 \"$SHA\"/" Casks/termi.rb
