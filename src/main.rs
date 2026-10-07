@@ -329,8 +329,9 @@ impl eframe::App for App {
         let font = self.fonts().regular;
 
         // ---- status line: ⌘n badges, tmux style ----
-        egui::Panel::bottom("status").exact_size(cell.h).show_separator_line(false).frame(egui::Frame::NONE.fill(background())).show(ui, |ui| {
+        egui::Panel::bottom("status").exact_size(cell.h + 6.0).show_separator_line(false).frame(egui::Frame::NONE.fill(background())).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            let bottom = ui.max_rect().bottom();
             ui.horizontal(|ui| {
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let glyph = match (tab.agent.is_some(), tab.state, tab.done) {
@@ -345,15 +346,24 @@ impl eframe::App for App {
                         _ => tab.label(),
                     };
                     let mut text = egui::RichText::new(format!("{pad}⌘{} {glyph}{label} ", i + 1)).font(FontId::new(font.size + 1.0, FontFamily::Name("tab".into())));
+                    let fill = match (i == self.active, tab.state) {
+                        (true, State::Working) if tab.agent.is_some() => Some(pulse()),
+                        (true, _) => Some(foreground()),
+                        _ => None,
+                    };
                     text = match (i == self.active, tab.state) {
-                        (true, State::Working) if tab.agent.is_some() => text.color(background()).background_color(pulse()),
-                        (true, _) => text.color(background()).background_color(foreground()),
+                        (true, _) => text.color(background()),
                         (false, State::Working) if tab.agent.is_some() => text.color(pulse()),
                         (false, State::NeedsInput) => text.color(Color32::from_rgb(0xcd, 0xcd, 0x00)),
                         (false, State::Idle) if tab.done => text.color(Color32::from_rgb(0x00, 0xcd, 0x00)),
                         _ => text.color(Color32::from_gray(160)),
                     };
+                    // badge fill runs down to the window's bottom edge, painted under the label
+                    let bg = ui.painter().add(egui::Shape::Noop);
                     let resp = ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false));
+                    if let Some(c) = fill {
+                        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.with_max_y(bottom), 0.0, c));
+                    }
                     if resp.clicked() {
                         self.active = i;
                     }
