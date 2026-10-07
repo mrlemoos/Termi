@@ -157,6 +157,9 @@ impl Tab {
             Some(a) => agent::resolve(a, &self.screen_text(), self.id),
             None => State::Idle,
         };
+        if let (Some(a), Some(_)) = (self.agent, std::env::var_os("TERMI_DEBUG")) {
+            debug_log(self.id, a.name(), self.state, &self.screen_text());
+        }
         // ponytail: 1s poll, so a turn shorter than that can finish unseen; hooks catch those.
         self.done = match self.state {
             State::Idle => self.done || (prev == State::Working && self.agent.is_some()),
@@ -218,6 +221,17 @@ impl Drop for Tab {
     /// Stops the IO thread, which drops the Pty, which hangs up the shell.
     fn drop(&mut self) {
         let _ = self.loop_tx.send(Msg::Shutdown);
+    }
+}
+
+/// TERMI_DEBUG=1: append each agent poll (state + bottom of screen) to $TMPDIR/termi/debug.log,
+/// the raw material for tuning `busy_marks`/`ask_marks`.
+fn debug_log(tab: u64, agent: &str, state: State, screen: &str) {
+    use std::io::Write;
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(15)..].join("\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(agent::state_dir().join("debug.log")) {
+        let _ = writeln!(f, "== tab {tab} {agent} {state:?}\n{tail}");
     }
 }
 
