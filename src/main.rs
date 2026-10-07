@@ -50,6 +50,8 @@ struct App {
     settings: settings::Settings,
     /// Some(cursor row) while the settings screen is open.
     settings_open: Option<usize>,
+    /// Some(draft name) while renaming the active tab.
+    renaming: Option<String>,
     fonts: Fonts,
     lights: Option<bool>,
     window_drag: bool,
@@ -71,7 +73,7 @@ impl App {
 
         let mut app = App {
             tabs: Vec::new(), active: 0, next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
-            settings: settings::Settings::load(), settings_open: None,
+            settings: settings::Settings::load(), settings_open: None, renaming: None,
             fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
         };
@@ -96,7 +98,24 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // renaming swallows every key until Enter/Escape
+        if let Some(buf) = &mut self.renaming {
+            let events = ctx.input_mut(|i| std::mem::take(&mut i.events));
+            match events.iter().find_map(|ev| rename_key(buf, ev)) {
+                Some(true) => {
+                    let name = buf.trim().to_owned();
+                    self.tabs[self.active].name = Some(name).filter(|n| !n.is_empty());
+                    self.renaming = None;
+                }
+                Some(false) => self.renaming = None,
+                None => {}
+            }
+            return;
+        }
         let cmd = |k| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, k));
+        if cmd(Key::R) {
+            self.renaming = Some(self.tabs[self.active].label());
+        }
         if cmd(Key::T) {
             let cwd = self.tabs[self.active].cwd.clone();
             self.new_tab(ctx, cwd);
@@ -126,6 +145,19 @@ impl App {
     }
 }
 
+/// One key into the rename draft: Some(true) commit, Some(false) cancel.
+fn rename_key(buf: &mut String, ev: &egui::Event) -> Option<bool> {
+    match ev {
+        egui::Event::Text(t) => buf.push_str(t),
+        egui::Event::Paste(t) => buf.push_str(t.lines().next().unwrap_or("")),
+        egui::Event::Key { key: Key::Backspace, pressed: true, .. } => _ = buf.pop(),
+        egui::Event::Key { key: Key::Enter, pressed: true, .. } => return Some(true),
+        egui::Event::Key { key: Key::Escape, pressed: true, .. } => return Some(false),
+        _ => {}
+    }
+    None
+}
+
 fn install_fonts(ctx: &egui::Context) {
     let mut defs = egui::FontDefinitions::default();
     let font = |b: &'static [u8]| Arc::new(egui::FontData::from_static(b));
@@ -136,10 +168,11 @@ fn install_fonts(ctx: &egui::Context) {
         defs.families.entry(fam).or_default().insert(0, "meslo".into());
     }
     defs.families.insert(FontFamily::Name("bold".into()), vec!["meslo-bold".into(), "meslo".into()]);
-    // Except tab titles: the system font (SF, default weight 400), like iTerm.
+    // Except tab titles: the system font (SF), like iTerm, semibold at its small-text optical size.
     let mut tab = vec!["meslo".into()];
     if let Ok(b) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
-        defs.font_data.insert("sf".into(), Arc::new(egui::FontData::from_owned(b)));
+        let tweak = egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([("wght", 600.0), ("opsz", 17.0)]), ..Default::default() };
+        defs.font_data.insert("sf".into(), Arc::new(egui::FontData::from_owned(b).tweak(tweak)));
         tab.insert(0, "sf".into());
     }
     defs.families.insert(FontFamily::Name("tab".into()), tab);
@@ -257,7 +290,13 @@ impl eframe::App for App {
                         (true, State::Idle, true) => "✓ ".into(),
                         _ => String::new(),
                     };
-                    let mut text = egui::RichText::new(format!(" ⌘{} {glyph}{} ", i + 1, tab.label())).font(FontId::new(FONT_SIZE, FontFamily::Name("tab".into())));
+                    // first badge: pad inside it so its fill reaches the window's rounded corner but ⌘ clears it
+                    let pad = if i == 0 { "    " } else { " " };
+                    let label = match &self.renaming {
+                        Some(buf) if i == self.active => format!("{buf}█"),
+                        _ => tab.label(),
+                    };
+                    let mut text = egui::RichText::new(format!("{pad}⌘{} {glyph}{label} ", i + 1)).font(FontId::new(FONT_SIZE + 1.0, FontFamily::Name("tab".into())));
                     text = match (i == self.active, tab.state) {
                         (true, State::Working) if tab.agent.is_some() => text.color(BG).background_color(pulse()),
                         (true, _) => text.color(BG).background_color(FG),
@@ -441,5 +480,21 @@ fn mascot(painter: &egui::Painter, top_left: Pos2, cell: &Cell, a: &dyn agent::A
     for (i, line) in a.sprite(frame).iter().enumerate() {
         let pos = top_left + vec2(0.0, i as f32 * cell.h / 3.0);
         painter.text(pos, egui::Align2::LEFT_TOP, *line, font.clone(), Color32::from_rgb(r, g, b));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_key_edits_commits_cancels() {
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let mut buf = "zsh".to_owned();
+        assert_eq!(rename_key(&mut buf, &key(Key::Backspace)), None);
+        assert_eq!(rename_key(&mut buf, &egui::Event::Text("!".into())), None);
+        assert_eq!(buf, "zs!");
+        assert_eq!(rename_key(&mut buf, &key(Key::Enter)), Some(true));
+        assert_eq!(rename_key(&mut buf, &key(Key::Escape)), Some(false));
     }
 }

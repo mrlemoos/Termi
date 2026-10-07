@@ -14,6 +14,7 @@ const ITEMS: &[(&str, &str, &str, Key)] = &[
     ("", "Settings…", ",", Key::Comma),
     ("Shell", "New Tab", "t", Key::T),
     ("Shell", "Close Tab", "w", Key::W),
+    ("Shell", "Rename Tab", "r", Key::R),
     ("View", "Toggle Tree", "b", Key::B),
     ("View", "Focus Tree", "\u{f703}", Key::ArrowRight),
     ("View", "Unfocus Tree", "\u{f702}", Key::ArrowLeft),

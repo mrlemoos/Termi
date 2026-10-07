@@ -48,6 +48,8 @@ pub struct Tab {
     title_pgid: i32,
     fg: i32,
     pub cmd: String,
+    /// Set by the user (⌘R); wins over the automatic label.
+    pub name: Option<String>,
     pub cwd: PathBuf,
     pub agent: Option<&'static dyn Agent>,
     pub state: State,
@@ -85,7 +87,7 @@ impl Tab {
 
         Ok(Tab {
             id, term, loop_tx, events, pid, fd, size, cwd,
-            title: String::new(), title_pgid: 0, fg: 0, cmd: String::new(), agent: None, state: State::Idle, done: false, exited: false,
+            title: String::new(), title_pgid: 0, fg: 0, cmd: String::new(), name: None, agent: None, state: State::Idle, done: false, exited: false,
         })
     }
 
@@ -183,11 +185,11 @@ impl Tab {
 
     /// Label for the status line.
     pub fn label(&self) -> String {
+        if let Some(n) = &self.name {
+            return n.clone();
+        }
         match self.agent {
-            Some(a) => match session_name(&self.title, a.name()).filter(|_| self.title_pgid == self.fg) {
-                Some(s) => format!("{}: {s}", a.name()),
-                None => a.name().to_owned(),
-            },
+            Some(a) => session_name(&self.title, a.name()).filter(|_| self.title_pgid == self.fg).unwrap_or_else(|| a.name().to_owned()),
             None => self.cmd.split_whitespace().next().unwrap_or("zsh").rsplit('/').next().unwrap_or("").trim_start_matches('-').to_owned(),
         }
     }
