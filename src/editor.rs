@@ -99,8 +99,18 @@ impl Editor {
                         }
                     }
                 });
+                let lang = self.path.extension().map_or(String::new(), |e| e.to_string_lossy().into_owned());
+                let theme = egui_extras::syntax_highlighting::CodeTheme::dark(font.size);
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                    let mut job = egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang);
+                    // egui_extras underlines italic tokens, and there's no italic face anyway
+                    job.sections.iter_mut().for_each(|s| (s.format.italics, s.format.underline) = (false, egui::Stroke::NONE));
+                    job.wrap.max_width = wrap;
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
                 let out = egui::TextEdit::multiline(&mut self.text)
                     .font(font.clone())
+                    .layouter(&mut layouter)
                     .text_color(FG)
                     .frame(egui::Frame::NONE)
                     .code_editor()

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 alacritty_terminal = "0.26.0"
 eframe = "0.36.2"
+egui_extras = { version = "0.36.2", features = ["syntect"] }
 libc = "0.2.190"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
