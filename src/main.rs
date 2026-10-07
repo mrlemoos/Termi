@@ -136,6 +136,13 @@ fn install_fonts(ctx: &egui::Context) {
         defs.families.entry(fam).or_default().insert(0, "meslo".into());
     }
     defs.families.insert(FontFamily::Name("bold".into()), vec!["meslo-bold".into(), "meslo".into()]);
+    // Except tab titles: Helvetica at weight 500, i.e. Helvetica Neue Medium (face 10 of the system .ttc).
+    let mut tab = vec!["meslo".into()];
+    if let Ok(b) = std::fs::read("/System/Library/Fonts/HelveticaNeue.ttc") {
+        defs.font_data.insert("helvetica-500".into(), Arc::new(egui::FontData { index: 10, ..egui::FontData::from_owned(b) }));
+        tab.insert(0, "helvetica-500".into());
+    }
+    defs.families.insert(FontFamily::Name("tab".into()), tab);
     ctx.set_fonts(defs);
 }
 
@@ -250,7 +257,7 @@ impl eframe::App for App {
                         (true, State::Idle, true) => "✓ ".into(),
                         _ => String::new(),
                     };
-                    let mut text = egui::RichText::new(format!(" ⌘{} {glyph}{} ", i + 1, tab.label())).font(font.clone());
+                    let mut text = egui::RichText::new(format!(" ⌘{} {glyph}{} ", i + 1, tab.label())).font(FontId::new(FONT_SIZE, FontFamily::Name("tab".into())));
                     text = match (i == self.active, tab.state) {
                         (true, State::Working) if tab.agent.is_some() => text.color(BG).background_color(pulse()),
                         (true, _) => text.color(BG).background_color(FG),
