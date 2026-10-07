@@ -2,6 +2,15 @@
 
 macOS terminal for coding agents. No chrome: traffic lights only appear when you hover the top edge.
 
+## Install
+
+```sh
+brew tap mrlemoos/termi https://github.com/mrlemoos/Termi
+brew install --cask termi
+```
+
+## Keys
+
 | Key | Action |
 |-----|--------|
 | ⌘T / ⌘W | new / close tab |
@@ -10,9 +19,20 @@ macOS terminal for coding agents. No chrome: traffic lights only appear when you
 | ⌘C / ⌘V | copy selection / paste |
 | ⌘, | settings (↑↓ move, space toggle, esc close). Saved to `~/.config/termi/settings` |
 
-**Editor:** ⌘S saves. ⌘' (or clicking a line number) adds a note to that line. ⌘↵ pastes every note into the agent as a review prompt. Esc closes.
+### Editor
 
-**Agents:** claude, codex, grok, and cursor-agent are detected from the tab's foreground process. Each one gets its own mascot. Agent state is read from the screen. Hooks are a fallback: any hook can write `idle`, `working`, or `input` to `$TERMI_STATE_DIR/$TERMI_TAB`.
+| Key | Action |
+|-----|--------|
+| ⌘S | save |
+| ⌘' or click line number | add note to that line |
+| ⌘↵ | paste every note into the agent as a review prompt |
+| Esc | close |
+
+## Agents
+
+claude, codex, grok, and cursor-agent are detected from the tab's foreground process. Each one gets its own mascot.
+
+Agent state is read from the screen. Hooks are a fallback: any hook can write `idle`, `working`, or `input` to `$TERMI_STATE_DIR/$TERMI_TAB`.
 
 Claude Code example (`~/.claude/settings.json`):
 
@@ -28,8 +48,9 @@ Claude Code example (`~/.claude/settings.json`):
 
 ## Build
 
-`cargo run` for dev. `scripts/bundle.sh` builds `dist/Termi.app` and `dist/Termi.zip`, then stamps the version and sha256 into `Casks/termi.rb`. Upload the zip to GitHub release `v<version>`.
+- Dev: `cargo run`
+- Release: `scripts/bundle.sh` builds `dist/Termi.app` and `dist/Termi.zip`, then stamps the version and sha256 into `Casks/termi.rb`. Upload the zip to GitHub release `v<version>`.
 
-Install: `brew tap mrlemoos/termi https://github.com/mrlemoos/Termi && brew install --cask termi`
+## License
 
 The MesloLGS Nerd Font Mono is compiled into the binary (Apache 2.0, see `assets/MESLO-LICENSE.txt`).
