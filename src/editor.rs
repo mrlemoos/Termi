@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use egui::{Color32, FontId, Key, Modifiers, RichText};
 
-use crate::term::FG;
+use crate::term::foreground;
 
 const DIM: Color32 = Color32::from_rgb(0x7f, 0x7f, 0x7f);
 const NOTE: Color32 = Color32::from_rgb(0xcd, 0xcd, 0x00);
@@ -111,7 +111,7 @@ impl Editor {
                 let out = egui::TextEdit::multiline(&mut self.text)
                     .font(font.clone())
                     .layouter(&mut layouter)
-                    .text_color(FG)
+                    .text_color(foreground())
                     .frame(egui::Frame::NONE)
                     .code_editor()
                     .desired_width(f32::INFINITY)
@@ -129,7 +129,7 @@ impl Editor {
             let (line, mut commit) = (*line, false);
             ui.horizontal(|ui| {
                 ui.label(t(format!("note L{line}> "), NOTE));
-                let resp = ui.add(egui::TextEdit::singleline(note).font(font.clone()).text_color(FG).frame(egui::Frame::NONE).desired_width(f32::INFINITY));
+                let resp = ui.add(egui::TextEdit::singleline(note).font(font.clone()).text_color(foreground()).frame(egui::Frame::NONE).desired_width(f32::INFINITY));
                 resp.request_focus();
                 commit = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             });

@@ -99,7 +99,7 @@ impl Tree {
             self.stamp = Some(Instant::now());
         }
         let name = root.file_name().map_or("/".into(), |n| n.to_string_lossy().into_owned());
-        ui.label(egui::RichText::new(format!(" {name}")).font(font.clone()).color(crate::term::FG).strong());
+        ui.label(egui::RichText::new(format!(" {name}")).font(font.clone()).color(crate::term::foreground()).strong());
 
         let mut action = None;
         let mut toggle = None;
@@ -141,11 +141,11 @@ impl Tree {
         for (i, row) in self.cache.iter().enumerate() {
             let file = row.path.file_name().unwrap_or_default().to_string_lossy();
             let icon = match (row.dir, row.open) { (true, true) => "", (true, false) => "", _ => "" };
-            let color = if row.dir { egui::Color32::from_rgb(0x5c, 0x5c, 0xff) } else { crate::term::FG };
+            let color = if row.dir { egui::Color32::from_rgb(0x5c, 0x5c, 0xff) } else { crate::term::foreground() };
             let mut text = egui::RichText::new(format!("{}{icon} {file}", row.prefix)).font(font.clone()).color(color);
             if i == sel {
                 // block cursor when focused, dim bar when not: like a tmux copy-mode selection
-                text = if *focused { text.color(crate::term::BG).background_color(crate::term::FG) } else { text.background_color(egui::Color32::from_gray(50)) };
+                text = if *focused { text.color(crate::term::background()).background_color(crate::term::foreground()) } else { text.background_color(egui::Color32::from_gray(50)) };
             }
             let resp = ui.add(egui::Label::new(text).sense(egui::Sense::click_and_drag()).selectable(false).truncate());
             resp.dnd_set_drag_payload(row.path.clone());

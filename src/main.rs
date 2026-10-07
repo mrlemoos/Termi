@@ -18,9 +18,8 @@ use egui::{Color32, FontFamily, FontId, Key, Modifiers, Pos2, Sense, vec2};
 use agent::State;
 use editor::{Editor, Outcome};
 use split::Layout;
-use term::{BG, Cell, FG, Fonts, Tab};
+use term::{Cell, Fonts, Tab, background, foreground};
 
-const FONT_SIZE: f32 = 14.0;
 /// Height of the hidden titlebar strip: hover shows traffic lights, drag moves the window.
 const TITLEBAR: f32 = 28.0;
 
@@ -58,7 +57,6 @@ struct App {
     renaming: Option<String>,
     /// Tab id of the pane being ⌘-dragged.
     pane_drag: Option<u64>,
-    fonts: Fonts,
     lights: Option<bool>,
     window_drag: bool,
     scroll_acc: f32,
@@ -67,20 +65,13 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context) -> App {
-        install_fonts(ctx);
         #[cfg(target_os = "macos")]
         menu::install(ctx);
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = BG;
-        visuals.window_fill = BG;
-        visuals.extreme_bg_color = BG;
-        visuals.override_text_color = Some(FG);
-        ctx.set_visuals(visuals);
-
+        let settings = settings::Settings::load();
+        apply(ctx, &settings);
         let mut app = App {
             tabs: Vec::new(), active: 0, screens: Vec::new(), next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
-            settings: settings::Settings::load(), settings_open: None, renaming: None, pane_drag: None,
-            fonts: Fonts { regular: FontId::new(FONT_SIZE, FontFamily::Monospace), bold: FontId::new(FONT_SIZE, FontFamily::Name("bold".into())) },
+            settings, settings_open: None, renaming: None, pane_drag: None,
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
         };
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
@@ -90,7 +81,7 @@ impl App {
 
     /// `split`: Some(side_by_side) splits the active pane, None opens a new screen.
     fn new_tab(&mut self, ctx: &egui::Context, cwd: PathBuf, split: Option<bool>) {
-        match Tab::spawn(self.next_id, cwd, ctx) {
+        match Tab::spawn(self.next_id, cwd, &self.settings.shell, ctx) {
             Ok(tab) => {
                 match (split, self.tabs.get(self.active)) {
                     (Some(side), Some(at)) => {
@@ -107,8 +98,13 @@ impl App {
         }
     }
 
+    fn fonts(&self) -> Fonts {
+        let size = self.settings.font_size as f32;
+        Fonts { regular: FontId::new(size, FontFamily::Monospace), bold: FontId::new(size, FontFamily::Name("bold".into())) }
+    }
+
     fn cell(&self, ctx: &egui::Context) -> Cell {
-        ctx.fonts_mut(|f| Cell { w: f.glyph_width(&self.fonts.regular, 'M'), h: f.row_height(&self.fonts.regular) })
+        ctx.fonts_mut(|f| Cell { w: f.glyph_width(&self.fonts().regular, 'M'), h: f.row_height(&self.fonts().regular) })
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -182,16 +178,42 @@ fn rename_key(buf: &mut String, ev: &egui::Event) -> Option<bool> {
     None
 }
 
-fn install_fonts(ctx: &egui::Context) {
+/// Theme, colours and fonts from the settings. Font size isn't here: it's read every frame.
+fn apply(ctx: &egui::Context, s: &settings::Settings) {
+    term::set_theme(&s.theme);
+    let mut visuals = if term::theme().light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    visuals.panel_fill = background();
+    visuals.window_fill = background();
+    visuals.extreme_bg_color = background();
+    visuals.override_text_color = Some(foreground());
+    ctx.set_visuals(visuals);
+    install_fonts(ctx, &s.font);
+}
+
+/// `name` from `settings::FONTS`; Meslo backs it up for missing files and glyphs (it has the Nerd Font icons).
+fn install_fonts(ctx: &egui::Context, name: &str) {
     let mut defs = egui::FontDefinitions::default();
     let font = |b: &'static [u8]| Arc::new(egui::FontData::from_static(b));
     defs.font_data.insert("meslo".into(), font(include_bytes!("../assets/MesloLGSNerdFontMono-Regular.ttf")));
     defs.font_data.insert("meslo-bold".into(), font(include_bytes!("../assets/MesloLGSNerdFontMono-Bold.ttf")));
+    let (mut mono, mut bold) = (vec!["meslo".to_owned()], vec!["meslo-bold".to_owned(), "meslo".to_owned()]);
+    let file = |path: &str, index: u32| std::fs::read(path).ok().map(|b| Arc::new(egui::FontData { index, ..egui::FontData::from_owned(b) }));
+    if let Some((_, Some((r, ri, b, bi)))) = settings::FONTS.iter().find(|(n, _)| *n == name) {
+        if let (Some(r), Some(b)) = (file(r, *ri), file(b, *bi)) {
+            defs.font_data.insert("user".into(), r);
+            defs.font_data.insert("user-bold".into(), b);
+            mono.insert(0, "user".into());
+            bold.insert(0, "user-bold".into());
+        }
+    }
     // Everything is monospace: it's a terminal.
     for fam in [FontFamily::Monospace, FontFamily::Proportional] {
-        defs.families.entry(fam).or_default().insert(0, "meslo".into());
+        let list = defs.families.entry(fam).or_default();
+        for (i, f) in mono.iter().enumerate() {
+            list.insert(i, f.clone());
+        }
     }
-    defs.families.insert(FontFamily::Name("bold".into()), vec!["meslo-bold".into(), "meslo".into()]);
+    defs.families.insert(FontFamily::Name("bold".into()), bold);
     // Except tab titles: the system font (SF), like iTerm, semibold at its small-text optical size.
     let mut tab = vec!["meslo".into()];
     if let Ok(b) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
@@ -249,7 +271,7 @@ fn epoch_ms() -> usize {
 impl eframe::App for App {
     /// Unpainted areas are the terminal background, not eframe's default grey.
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        BG.to_normalized_gamma_f32()
+        background().to_normalized_gamma_f32()
     }
 
     #[cfg(target_os = "macos")]
@@ -304,10 +326,10 @@ impl eframe::App for App {
         }
 
         let cell = self.cell(&ctx);
-        let font = self.fonts.regular.clone();
+        let font = self.fonts().regular;
 
         // ---- status line: ⌘n badges, tmux style ----
-        egui::Panel::bottom("status").exact_size(cell.h).show_separator_line(false).frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
+        egui::Panel::bottom("status").exact_size(cell.h).show_separator_line(false).frame(egui::Frame::NONE.fill(background())).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             ui.horizontal(|ui| {
                 for (i, tab) in self.tabs.iter().enumerate() {
@@ -322,10 +344,10 @@ impl eframe::App for App {
                         Some(buf) if i == self.active => format!("{buf}█"),
                         _ => tab.label(),
                     };
-                    let mut text = egui::RichText::new(format!("{pad}⌘{} {glyph}{label} ", i + 1)).font(FontId::new(FONT_SIZE + 1.0, FontFamily::Name("tab".into())));
+                    let mut text = egui::RichText::new(format!("{pad}⌘{} {glyph}{label} ", i + 1)).font(FontId::new(font.size + 1.0, FontFamily::Name("tab".into())));
                     text = match (i == self.active, tab.state) {
-                        (true, State::Working) if tab.agent.is_some() => text.color(BG).background_color(pulse()),
-                        (true, _) => text.color(BG).background_color(FG),
+                        (true, State::Working) if tab.agent.is_some() => text.color(background()).background_color(pulse()),
+                        (true, _) => text.color(background()).background_color(foreground()),
                         (false, State::Working) if tab.agent.is_some() => text.color(pulse()),
                         (false, State::NeedsInput) => text.color(Color32::from_rgb(0xcd, 0xcd, 0x00)),
                         (false, State::Idle) if tab.done => text.color(Color32::from_rgb(0x00, 0xcd, 0x00)),
@@ -341,7 +363,7 @@ impl eframe::App for App {
                     if let Some(a) = tab.agent {
                         let cols = a.sprite(0).iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
                         let (r, _) = ui.allocate_exact_size(vec2((cols / 3.0 + 1.0) * cell.w, cell.h), Sense::hover());
-                        mascot(ui.painter(), r.min + vec2(cell.w * 0.5, 0.0), &cell, a, tab.state);
+                        mascot(ui.painter(), r.min + vec2(cell.w * 0.5, 0.0), &cell, font.size, a, tab.state);
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -358,7 +380,7 @@ impl eframe::App for App {
             egui::Panel::left("tree")
                 .resizable(true)
                 .default_size(260.0)
-                .frame(egui::Frame::NONE.fill(BG).inner_margin(egui::Margin { left: 6, right: 6, top: TITLEBAR as i8, bottom: 0 }))
+                .frame(egui::Frame::NONE.fill(background()).inner_margin(egui::Margin { left: 6, right: 6, top: TITLEBAR as i8, bottom: 0 }))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
@@ -375,8 +397,13 @@ impl eframe::App for App {
         let central = egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(cursor) = &mut self.settings_open {
                 ui.add_space(TITLEBAR);
+                let before = self.settings.clone();
                 if !self.settings.show(ui, &font, cursor) {
                     self.settings_open = None;
+                }
+                if self.settings != before {
+                    apply(&ctx, &self.settings);
+                    self.settings.save();
                 }
                 return;
             }
@@ -443,7 +470,7 @@ impl eframe::App for App {
                     None => {
                         ctx.set_cursor_icon(egui::CursorIcon::Grab);
                         if let Some((_, r)) = target {
-                            outline(r, FG);
+                            outline(r, foreground());
                         }
                     }
                 }
@@ -460,9 +487,9 @@ impl eframe::App for App {
         if let (Some(path), Some(pos)) = (egui::DragAndDrop::payload::<PathBuf>(&ctx), ctx.pointer_hover_pos()) {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd")));
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let r = painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), BG);
-            painter.rect_filled(r.expand(2.0), 0.0, FG);
-            painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), BG);
+            let r = painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), background());
+            painter.rect_filled(r.expand(2.0), 0.0, foreground());
+            painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), background());
         }
 
         let busy = self.tabs.iter().any(|t| t.agent.is_some() && t.state == State::Working);
@@ -480,6 +507,7 @@ impl App {
         let pad = if top { TITLEBAR } else { 4.0 };
         let origin = rect.min + vec2(4.0, pad);
         let is_active = i == self.active;
+        let fonts = self.fonts();
         let tab = &mut self.tabs[i];
         let (cols, rows) = term::grid_size(rect.size() - vec2(8.0, pad), cell);
         tab.resize(cols, rows, cell);
@@ -559,9 +587,9 @@ impl App {
 
         let painter = ui.painter_at(rect);
         // hollow cursor while the tree has the keys
-        term::paint(tab, &painter, origin, cell, &self.fonts, resp.has_focus() && !self.tree_focus);
+        term::paint(tab, &painter, origin, cell, &fonts, resp.has_focus() && !self.tree_focus);
         if resp.dnd_hover_payload::<PathBuf>().is_some() {
-            painter.rect_stroke(rect.shrink(1.0), 0.0, egui::Stroke::new(1.0, FG), egui::StrokeKind::Inside);
+            painter.rect_stroke(rect.shrink(1.0), 0.0, egui::Stroke::new(1.0, foreground()), egui::StrokeKind::Inside);
         }
     }
 }
@@ -571,8 +599,8 @@ fn pane_id(tab: u64) -> egui::Id {
 }
 
 /// Tamagotchi: the 3-row sprite squeezed into one status-line row. Walks while working.
-fn mascot(painter: &egui::Painter, top_left: Pos2, cell: &Cell, a: &dyn agent::Agent, state: State) {
-    let font = FontId::new(FONT_SIZE / 3.0, FontFamily::Monospace);
+fn mascot(painter: &egui::Painter, top_left: Pos2, cell: &Cell, size: f32, a: &dyn agent::Agent, state: State) {
+    let font = FontId::new(size / 3.0, FontFamily::Monospace);
     let frame = if state == State::Working { epoch_ms() / 250 } else { 0 };
     let [r, g, b] = a.color();
     for (i, line) in a.sprite(frame).iter().enumerate() {
@@ -594,5 +622,55 @@ mod tests {
         assert_eq!(buf, "zs!");
         assert_eq!(rename_key(&mut buf, &key(Key::Enter)), Some(true));
         assert_eq!(rename_key(&mut buf, &key(Key::Escape)), Some(false));
+    }
+
+    /// Visual tests: the ⌘, screen rendered in every theme and font. `UPDATE_SNAPSHOTS=1 cargo test` to re-record.
+    fn settings_screen(s: settings::Settings, cursor: usize) -> egui_kittest::Harness<'static, settings::Settings> {
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(720.0, 260.0)).build_ui_state(
+            move |ui, s: &mut settings::Settings| {
+                let before = s.clone();
+                ui.painter().rect_filled(ui.max_rect(), 0.0, background());
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                let mut c = cursor;
+                s.show(ui, &FontId::monospace(s.font_size as f32), &mut c);
+                if *s != before {
+                    apply(ui.ctx(), s);
+                }
+            },
+            s,
+        );
+        apply(&h.ctx, h.state());
+        h.run();
+        h
+    }
+
+    #[test]
+    fn settings_snapshots() {
+        let _theme = term::THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut results = egui_kittest::SnapshotResults::new();
+        let mut shot = |s: settings::Settings, cursor: usize, name: &str| {
+            let mut h = settings_screen(s, cursor);
+            h.snapshot(name);
+            results.extend_harness(&mut h);
+        };
+        let base = settings::Settings::default();
+        for t in &term::THEMES {
+            shot(settings::Settings { theme: t.name.into(), ..base.clone() }, 3, &format!("settings_theme_{}", t.name.replace(' ', "_")));
+        }
+        for (name, _) in settings::FONTS {
+            shot(settings::Settings { font: name.into(), ..base.clone() }, 2, &format!("settings_font_{}", name.replace(' ', "_")));
+        }
+        shot(settings::Settings { font_size: 20, ..base.clone() }, 1, "settings_font_size_20");
+
+        // → on the colours row switches theme and repaints in it
+        let mut h = settings_screen(base.clone(), 3);
+        h.key_press(Key::ArrowRight);
+        h.run();
+        assert_eq!(h.state().theme, "solarized dark");
+        assert_eq!(background(), Color32::from_rgb(0x00, 0x2b, 0x36));
+        h.snapshot("settings_after_right_arrow");
+        results.extend_harness(&mut h);
+        term::set_theme("xterm");
+        results.unwrap();
     }
 }

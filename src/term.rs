@@ -65,7 +65,8 @@ pub struct Cell {
 }
 
 impl Tab {
-    pub fn spawn(id: u64, cwd: PathBuf, ctx: &egui::Context) -> std::io::Result<Tab> {
+    /// `shell`: a program to run as a login shell; empty = the user's login shell.
+    pub fn spawn(id: u64, cwd: PathBuf, shell: &str, ctx: &egui::Context) -> std::io::Result<Tab> {
         let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
         let env = HashMap::from([
             ("TERM_PROGRAM".into(), "Termi".into()),
@@ -73,7 +74,7 @@ impl Tab {
             ("TERMI_TAB".into(), id.to_string()),
             ("TERMI_STATE_DIR".into(), agent::state_dir().to_string_lossy().into_owned()),
         ]);
-        let opts = tty::Options { shell: None, working_directory: Some(cwd.clone()), drain_on_exit: false, env };
+        let opts = tty::Options { shell: (!shell.is_empty()).then(|| tty::Shell::new(shell.into(), vec!["-l".into()])), working_directory: Some(cwd.clone()), drain_on_exit: false, env };
         let pty = tty::new(&opts, size, id)?;
         let (pid, fd) = (pty.child().id(), pty.file().as_raw_fd());
 
@@ -272,17 +273,59 @@ fn proc_cwd(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(raw.to_str().ok()?))
 }
 
-// ---------- colors: plain xterm, black background ----------
+// ---------- colors: one global theme, plain xterm by default ----------
 
-pub const BG: Color32 = Color32::BLACK;
-pub const FG: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5);
+pub struct Theme {
+    pub name: &'static str,
+    bg: u32,
+    fg: u32,
+    pub ansi: [u32; 16],
+    pub light: bool,
+}
 
-const ANSI: [u32; 16] = [
-    0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
-    0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+const SOLARIZED: [u32; 16] = [
+    0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+    0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
 ];
 
-fn hex(c: u32) -> Color32 {
+pub const THEMES: [Theme; 4] = [
+    Theme { name: "xterm", bg: 0x000000, fg: 0xe5e5e5, ansi: [
+        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+        0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+    ], light: false },
+    Theme { name: "solarized dark", bg: 0x002b36, fg: 0x839496, ansi: SOLARIZED, light: false },
+    Theme { name: "solarized light", bg: 0xfdf6e3, fg: 0x657b83, ansi: SOLARIZED, light: true },
+    Theme { name: "gruvbox", bg: 0x282828, fg: 0xebdbb2, ansi: [
+        0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
+        0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
+    ], light: false },
+];
+
+// ponytail: one global theme read by every painter; thread it through if windows ever get their own.
+static THEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Unknown names fall back to xterm.
+pub fn set_theme(name: &str) {
+    THEME.store(THEMES.iter().position(|t| t.name == name).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Tests that touch the global theme take this so they don't see each other's.
+#[cfg(test)]
+pub static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn theme() -> &'static Theme {
+    &THEMES[THEME.load(std::sync::atomic::Ordering::Relaxed)]
+}
+
+pub fn background() -> Color32 {
+    hex(theme().bg)
+}
+
+pub fn foreground() -> Color32 {
+    hex(theme().fg)
+}
+
+pub fn hex(c: u32) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
@@ -299,17 +342,17 @@ fn dim(c: Color32) -> Color32 {
 fn index_color(i: usize) -> Color32 {
     const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
     match i {
-        0..16 => hex(ANSI[i]),
+        0..16 => hex(theme().ansi[i]),
         16..232 => {
             let i = i - 16;
             Color32::from_rgb(CUBE[i / 36], CUBE[i / 6 % 6], CUBE[i % 6])
         }
         232..256 => Color32::from_gray(8 + 10 * (i - 232) as u8),
-        256 | 258 => FG,
-        257 => BG,
-        259..267 => dim(hex(ANSI[i - 259])),
+        256 | 258 => foreground(),
+        257 => background(),
+        259..267 => dim(hex(theme().ansi[i - 259])),
         267 => Color32::WHITE,
-        _ => dim(FG),
+        _ => dim(foreground()),
     }
 }
 
@@ -365,7 +408,7 @@ pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fo
             std::mem::swap(&mut fg, &mut bg);
         }
         let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
-        if bg != BG {
+        if bg != background() {
             painter.rect_filled(Rect::from_min_size(at(row, col), vec2(cell.w * width, cell.h)), 0.0, bg);
         }
         if flags.contains(Flags::UNDERLINE) {
@@ -390,10 +433,10 @@ pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fo
     let p = at(cursor.point.line.0 + off, cursor.point.column.0);
     let r = Rect::from_min_size(p, vec2(cell.w, cell.h));
     match cursor.shape {
-        CursorShape::Block if !focused => { painter.rect_stroke(r, 0.0, Stroke::new(1.0, FG), egui::StrokeKind::Inside); }
-        CursorShape::HollowBlock => { painter.rect_stroke(r, 0.0, Stroke::new(1.0, FG), egui::StrokeKind::Inside); }
-        CursorShape::Beam => { painter.rect_filled(Rect::from_min_size(p, vec2(2.0, cell.h)), 0.0, FG); }
-        CursorShape::Underline => { painter.rect_filled(Rect::from_min_size(p + vec2(0.0, cell.h - 2.0), vec2(cell.w, 2.0)), 0.0, FG); }
+        CursorShape::Block if !focused => { painter.rect_stroke(r, 0.0, Stroke::new(1.0, foreground()), egui::StrokeKind::Inside); }
+        CursorShape::HollowBlock => { painter.rect_stroke(r, 0.0, Stroke::new(1.0, foreground()), egui::StrokeKind::Inside); }
+        CursorShape::Beam => { painter.rect_filled(Rect::from_min_size(p, vec2(2.0, cell.h)), 0.0, foreground()); }
+        CursorShape::Underline => { painter.rect_filled(Rect::from_min_size(p + vec2(0.0, cell.h - 2.0), vec2(cell.w, 2.0)), 0.0, foreground()); }
         _ => {}
     }
 }
@@ -449,6 +492,7 @@ mod tests {
 
     #[test]
     fn keys_and_colors() {
+        let _theme = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let none = Modifiers::NONE;
         assert_eq!(key_bytes(Key::C, Modifiers::CTRL, false).unwrap().as_ref(), b"\x03");
         assert_eq!(key_bytes(Key::ArrowUp, none, true).unwrap().as_ref(), b"\x1bOA");
@@ -462,6 +506,6 @@ mod tests {
         assert_eq!(dim(Color32::WHITE), Color32::from_gray(170));
         assert_eq!(index_color(16), Color32::BLACK);
         assert_eq!(index_color(231), Color32::WHITE);
-        assert_eq!(index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize), BG);
+        assert_eq!(index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize), background());
     }
 }
