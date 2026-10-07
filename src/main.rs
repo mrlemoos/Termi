@@ -2,6 +2,8 @@ use eframe::egui;
 
 mod agent;
 mod editor;
+#[cfg(target_os = "macos")]
+mod menu;
 mod settings;
 mod term;
 mod tree;
@@ -58,6 +60,8 @@ struct App {
 impl App {
     fn new(ctx: &egui::Context) -> App {
         install_fonts(ctx);
+        #[cfg(target_os = "macos")]
+        menu::install(ctx);
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = BG;
         visuals.window_fill = BG;
@@ -182,6 +186,11 @@ impl eframe::App for App {
     /// Unpainted areas are the terminal background, not eframe's default grey.
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         BG.to_normalized_gamma_f32()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn raw_input_hook(&mut self, _: &egui::Context, raw: &mut egui::RawInput) {
+        raw.events.extend(menu::take());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
