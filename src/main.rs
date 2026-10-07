@@ -21,7 +21,7 @@ use split::Layout;
 use term::{Cell, Fonts, Tab, background, foreground};
 
 /// Height of the hidden titlebar strip: hover shows traffic lights, drag moves the window.
-const TITLEBAR: f32 = 28.0;
+const TITLEBAR: f32 = 40.0;
 
 fn main() -> eframe::Result {
     alacritty_terminal::tty::setup_env();
@@ -331,7 +331,7 @@ impl eframe::App for App {
         let font = self.fonts().regular;
 
         // ---- status line: ⌘n badges, tmux style ----
-        egui::Panel::bottom("status").exact_size(cell.h + 6.0).show_separator_line(false).frame(egui::Frame::NONE.fill(background())).show(ui, |ui| {
+        egui::Panel::bottom("status").exact_size(cell.h + 12.0).show_separator_line(false).frame(egui::Frame::NONE.fill(background()).inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 6 })).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             let bottom = ui.max_rect().bottom();
             ui.horizontal(|ui| {
@@ -341,13 +341,11 @@ impl eframe::App for App {
                         (true, State::Idle, true) => "✓ ".into(),
                         _ => String::new(),
                     };
-                    // first badge: pad inside it so its fill reaches the window's rounded corner but ⌘ clears it
-                    let pad = if i == 0 { "    " } else { " " };
                     let label = match &self.renaming {
                         Some(buf) if i == self.active => format!("{buf}█"),
                         _ => tab.label(),
                     };
-                    let mut text = egui::RichText::new(format!("{pad}⌘{} {glyph}{label} ", i + 1)).font(FontId::new(font.size + 1.0, FontFamily::Name("tab".into())));
+                    let mut text = egui::RichText::new(format!("    ⌘{} {glyph}{label}    ", i + 1)).font(FontId::new(font.size + 1.0, FontFamily::Name("tab".into())));
                     let fill = match (i == self.active, tab.state) {
                         (true, State::Working) if tab.agent.is_some() => Some(pulse()),
                         (true, _) => Some(foreground()),
@@ -364,7 +362,7 @@ impl eframe::App for App {
                     let bg = ui.painter().add(egui::Shape::Noop);
                     let resp = ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false));
                     if let Some(c) = fill {
-                        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.with_max_y(bottom), 0.0, c));
+                        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.with_min_y(resp.rect.top() - 6.0).with_max_y(bottom + 6.0), 0.0, c));
                     }
                     if resp.clicked() {
                         self.active = i;
