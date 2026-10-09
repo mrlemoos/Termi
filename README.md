@@ -30,9 +30,16 @@ brew install --cask termi
 | Key | Action |
 |-----|--------|
 | ⌘S | save |
-| ⌘' or click line number | add note to that line |
+| ⌘E | toggle Markdown preview/source |
+| ⌘' or click line number | add note to that source line |
 | ⌘↵ | paste every note into the agent as a review prompt |
 | Esc | close |
+
+`.md` and `.markdown` files open in preview. Click `preview | source` or press ⌘E to edit raw Markdown. Preview includes unsaved edits; ⌘S saves the source. Switching views preserves edits and review notes. Notes can be added in source only.
+
+Preview renders headings, emphasis, lists, links, fenced code, tables and read-only task lists in terminal fonts. Emphasis is underlined. Images show `[Image: alt text]` or `[Image: no alt text]`; HTML shows `[HTML: not rendered]`. Images aren't fetched and HTML isn't executed.
+
+Web links open in your browser. Relative Markdown links open in Termi, starting at the top of the file. File navigation, including the tree, blocks while edits are unsaved. Save, then select the destination again; or press Esc twice to discard and close first.
 
 ## Agents
 

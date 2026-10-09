@@ -21,6 +21,7 @@ const ITEMS: &[(&str, &str, &str, Key)] = &[
     ("View", "Focus Tree", "\u{f703}", Key::ArrowRight),
     ("View", "Unfocus Tree", "\u{f702}", Key::ArrowLeft),
     ("Editor", "Save", "s", Key::S),
+    ("Editor", "Toggle Markdown Source", "e", Key::E),
     ("Editor", "Add Note", "'", Key::Quote),
     ("Editor", "Send Notes", "\r", Key::Enter),
     ("Tab", "Tab 1", "1", Key::Num1),

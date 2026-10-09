@@ -2,6 +2,7 @@ use eframe::egui;
 
 mod agent;
 mod editor;
+mod markdown;
 #[cfg(target_os = "macos")]
 mod menu;
 mod settings;
@@ -395,6 +396,10 @@ impl eframe::App for App {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                         if let Some(tree::Action::Open(p)) = self.tree.show(ui, &cwd, &font, &mut self.tree_focus) {
+                            if let Some(ed) = &mut self.editor {
+                                ed.navigate(p);
+                                return;
+                            }
                             match Editor::open(p) {
                                 Ok(ed) => self.editor = Some(ed),
                                 Err(e) => eprintln!("termi: {e}"),
