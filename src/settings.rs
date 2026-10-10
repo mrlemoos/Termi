@@ -10,6 +10,7 @@ use crate::term::{self, background, foreground};
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     pub notifications: bool,
+    pub glass: String,
     pub font_size: u8,
     /// A name from `FONTS`.
     pub font: String,
@@ -21,7 +22,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { notifications: true, font_size: 14, font: FONTS[0].0.into(), theme: term::THEMES[0].name.into(), shell: String::new() }
+        Settings { glass: "off".into(), notifications: true, font_size: 14, font: FONTS[0].0.into(), theme: term::THEMES[0].name.into(), shell: String::new() }
     }
 }
 
@@ -38,12 +39,13 @@ const SF_MONO_REGULAR: &str = "/System/Applications/Utilities/Terminal.app/Conte
 const SF_MONO_BOLD: &str = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SF-Mono-Bold.otf";
 
 /// (key, label). Add a field, a row here and an arm in `get`/`set`/`step` to add an option.
-const ROWS: [(&str, &str); 5] = [
+const ROWS: [(&str, &str); 6] = [
     ("notifications", "notify when an agent finishes or needs you"),
     ("font_size", "font size"),
     ("font", "font"),
     ("theme", "colours"),
     ("shell", "shell for new tabs"),
+    ("glass", "translucent light"),
 ];
 
 impl Settings {
@@ -53,7 +55,8 @@ impl Settings {
             1 => self.font_size.to_string(),
             2 => self.font.clone(),
             3 => self.theme.clone(),
-            _ => self.shell.clone(),
+            4 => self.shell.clone(),
+            _ => self.glass.clone(),
         }
     }
 
@@ -67,7 +70,9 @@ impl Settings {
             }
             2 => self.font = v.into(),
             3 => self.theme = v.into(),
-            _ => self.shell = v.into(),
+            4 => self.shell = v.into(),
+            5 if ["off", "wave", "still"].contains(&v) => self.glass = v.into(),
+            _ => {},
         }
     }
 
@@ -77,6 +82,7 @@ impl Settings {
             2 => FONTS.iter().filter(|(_, f)| f.is_none_or(|(r, _, _, _)| std::path::Path::new(r).exists())).map(|(n, _)| n.to_string()).collect(),
             3 => term::THEMES.iter().map(|t| t.name.into()).collect(),
             4 => std::iter::once(String::new()).chain(shells(&std::fs::read_to_string("/etc/shells").unwrap_or_default())).collect(),
+            5 => ["off", "wave", "still"].map(String::from).to_vec(),
             _ => Vec::new(),
         }
     }
@@ -202,12 +208,24 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let s = Settings { notifications: false, font_size: 18, font: "Menlo".into(), theme: "gruvbox".into(), shell: "/bin/bash".into() };
-        assert_eq!(s.serialize(), "notifications=false\nfont_size=18\nfont=Menlo\ntheme=gruvbox\nshell=/bin/bash\n");
+        let s = Settings { glass: "wave".into(), notifications: false, font_size: 18, font: "Menlo".into(), theme: "gruvbox".into(), shell: "/bin/bash".into() };
+        assert_eq!(s.serialize(), "notifications=false\nfont_size=18\nfont=Menlo\ntheme=gruvbox\nshell=/bin/bash\nglass=wave\n");
         assert_eq!(Settings::parse(&s.serialize()), s);
         assert_eq!(Settings::parse("junk\nunknown=false"), Settings::default());
         // old files: just the notifications line
         assert_eq!(Settings::parse("notifications=false\n"), Settings { notifications: false, ..Settings::default() });
+    }
+
+    #[test]
+    fn glass_cycles_and_rejects_unknown_values() {
+        let mut s = Settings::default();
+        s.step(5, 1);
+        assert_eq!(s.glass, "wave");
+        s.step(5, 1);
+        assert_eq!(s.glass, "still");
+        s.step(5, 1);
+        assert_eq!(s.glass, "off");
+        assert_eq!(Settings::parse("glass=invalid").glass, "off");
     }
 
     #[test]

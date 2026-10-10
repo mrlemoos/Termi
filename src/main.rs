@@ -1,6 +1,7 @@
 use eframe::egui;
 
 mod agent;
+mod glass;
 mod editor;
 mod markdown;
 #[cfg(target_os = "macos")]
@@ -29,6 +30,7 @@ fn main() -> eframe::Result {
     let _ = std::fs::create_dir_all(agent::state_dir());
     let viewport = egui::ViewportBuilder::default()
         .with_title("Termi")
+        .with_transparent(true)
         .with_inner_size([1000.0, 640.0])
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
@@ -185,7 +187,7 @@ fn rename_key(buf: &mut String, ev: &egui::Event) -> Option<bool> {
 fn apply(ctx: &egui::Context, s: &settings::Settings) {
     term::set_theme(&s.theme);
     let mut visuals = if term::theme().light { egui::Visuals::light() } else { egui::Visuals::dark() };
-    visuals.panel_fill = background();
+    visuals.panel_fill = if s.glass == "off" { background() } else { Color32::TRANSPARENT };
     visuals.window_fill = background();
     visuals.extreme_bg_color = background();
     visuals.override_text_color = Some(foreground());
@@ -274,7 +276,7 @@ fn epoch_ms() -> usize {
 impl eframe::App for App {
     /// Unpainted areas are the terminal background, not eframe's default grey.
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        background().to_normalized_gamma_f32()
+        if self.settings.glass == "off" { background().to_normalized_gamma_f32() } else { [0.0; 4] }
     }
 
     #[cfg(target_os = "macos")]
@@ -284,6 +286,15 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let glass = self.settings.glass != "off";
+        if glass {
+            let time = if self.settings.glass == "wave" { ctx.input(|i| i.time) } else { 0.0 };
+            glass::paint(ui.painter(), ui.max_rect(), time, term::theme().light);
+            if self.settings.glass == "wave" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                ctx.request_repaint_after(Duration::from_millis(33));
+            }
+        }
+        let panel_fill = if glass { Color32::TRANSPARENT } else { background() };
         for t in &mut self.tabs {
             t.pump(&ctx);
         }
@@ -332,7 +343,7 @@ impl eframe::App for App {
         let font = self.fonts().regular;
 
         // ---- status line: ⌘n badges, tmux style ----
-        egui::Panel::bottom("status").exact_size(cell.h + 12.0).show_separator_line(false).frame(egui::Frame::NONE.fill(background()).inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 6 })).show(ui, |ui| {
+        egui::Panel::bottom("status").exact_size(cell.h + 12.0).show_separator_line(false).frame(egui::Frame::NONE.fill(panel_fill).inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 6 })).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             let bottom = ui.max_rect().bottom();
             ui.horizontal(|ui| {
@@ -391,7 +402,7 @@ impl eframe::App for App {
             egui::Panel::left("tree")
                 .resizable(true)
                 .default_size(260.0)
-                .frame(egui::Frame::NONE.fill(background()).inner_margin(egui::Margin { left: 6, right: 6, top: TITLEBAR as i8, bottom: 0 }))
+                .frame(egui::Frame::NONE.fill(panel_fill).inner_margin(egui::Margin { left: 6, right: 6, top: TITLEBAR as i8, bottom: 0 }))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
