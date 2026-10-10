@@ -207,11 +207,11 @@ fn shells(text: &str) -> impl Iterator<Item = String> + '_ {
 }
 
 /// Native Notification Center banner.
-// ponytail: osascript, so banners are attributed to Script Editor; UNUserNotificationCenter once the .app is signed.
 pub fn notify(title: &str, body: &str) {
-    let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"{}\"", q(body), q(title));
-    let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
+    #[cfg(target_os = "macos")]
+    crate::notifications::notify(title, body);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (title, body);
 }
 
 #[cfg(test)]

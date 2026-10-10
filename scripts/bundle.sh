@@ -13,6 +13,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleName</key><string>Termi</string>
+  <key>CFBundleDisplayName</key><string>Termi</string>
   <key>CFBundleIdentifier</key><string>dev.termi.app</string>
   <key>CFBundleExecutable</key><string>termi</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
@@ -20,8 +21,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>Termi</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSServices</key>
+  <array><dict>
+    <key>NSMenuItem</key><dict><key>default</key><string>Open in Termi</string></dict>
+    <key>NSMessage</key><string>openInTermi</string>
+    <key>NSPortName</key><string>Termi</string>
+    <key>NSSendTypes</key><array><string>public.file-url</string><string>NSFilenamesPboardType</string></array>
+    <key>NSRequiredContext</key><dict><key>NSApplicationIdentifier</key><string>com.apple.finder</string></dict>
+  </dict></array>
 </dict></plist>
 PLIST
+plutil -lint "$APP/Contents/Info.plist"
 if [ -n "${SIGNING_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP"
 else

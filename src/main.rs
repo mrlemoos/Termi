@@ -6,6 +6,8 @@ mod editor;
 mod markdown;
 #[cfg(target_os = "macos")]
 mod menu;
+#[cfg(target_os = "macos")]
+mod notifications;
 mod settings;
 mod split;
 mod term;
@@ -72,8 +74,6 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context) -> App {
-        #[cfg(target_os = "macos")]
-        menu::install(ctx);
         let settings = settings::Settings::load();
         apply(ctx, &settings);
         let mut app = App {
@@ -85,6 +85,11 @@ impl App {
         };
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
         app.new_tab(ctx, std::env::current_dir().ok().filter(|d| d != Path::new("/")).unwrap_or(home), None);
+        #[cfg(target_os = "macos")]
+        {
+            notifications::install();
+            menu::install(ctx);
+        }
         app
     }
 
@@ -290,6 +295,17 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "macos")]
+        {
+            let paths = menu::take_paths();
+            if !paths.is_empty() {
+                for path in paths {
+                    self.new_tab(&ctx, path, None);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
         let glass = self.settings.glass != "off";
         #[cfg(target_os = "macos")]
         glass::blur(&mut self.blur, _frame, glass && self.settings.glass_opacity < 1.0);

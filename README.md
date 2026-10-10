@@ -15,6 +15,10 @@ brew tap mrlemoos/termi https://github.com/mrlemoos/Termi
 brew install --cask termi
 ```
 
+In Finder, right-click selected files or folders and choose **Services → Open in Termi**. Folders open as new tabs; files open their parent folder. Selecting several files in the same folder opens one tab. Launch Termi once after installing or updating to register the Service. If it is hidden, enable it in System Settings → Keyboard → Keyboard Shortcuts → Services.
+
+Agent notifications use Termi's name and icon. macOS asks for permission when Termi first sends a notification. Notification preferences are in System Settings → Notifications → Termi; ⌘, toggles them inside Termi. Native notifications require the bundled app, so `cargo run` does not send them.
+
 ## Keys
 
 | Key | Action |
