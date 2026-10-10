@@ -63,6 +63,8 @@ struct App {
     /// Tab id of the pane being ⌘-dragged.
     pane_drag: Option<u64>,
     lights: Option<bool>,
+    #[cfg(target_os = "macos")]
+    blur: Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>>,
     window_drag: bool,
     scroll_acc: f32,
     last_poll: Instant,
@@ -78,6 +80,8 @@ impl App {
             tabs: Vec::new(), active: 0, screens: Vec::new(), next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
             settings, settings_open: None, renaming: None, pane_drag: None,
             lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
+            #[cfg(target_os = "macos")]
+            blur: None,
         };
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
         app.new_tab(ctx, std::env::current_dir().ok().filter(|d| d != Path::new("/")).unwrap_or(home), None);
@@ -287,6 +291,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let glass = self.settings.glass != "off";
+        #[cfg(target_os = "macos")]
+        glass::blur(&mut self.blur, glass);
         if glass {
             let time = if self.settings.glass == "wave" { ctx.input(|i| i.time) } else { 0.0 };
             glass::paint(ui.painter(), ui.max_rect(), time, term::theme().light);

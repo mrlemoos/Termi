@@ -1,5 +1,35 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 
+#[cfg(target_os = "macos")]
+pub fn blur(effect: &mut Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>>, enabled: bool) {
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView};
+    if !enabled {
+        if let Some(view) = effect.take() {
+            if let (Some(window), Some(content)) = (view.window(), view.subviews().firstObject()) {
+                window.setContentView(Some(&content));
+                window.makeFirstResponder(Some(&content));
+            }
+        }
+        return;
+    }
+    if effect.is_none() && enabled {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(window) = NSApplication::sharedApplication(mtm).windows().firstObject() else { return };
+        let Some(content) = window.contentView() else { return };
+        let view = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.bounds());
+        view.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        view.setState(NSVisualEffectState::Active);
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        content.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        window.setContentView(Some(&view));
+        view.addSubview(&content);
+        window.makeFirstResponder(Some(&content));
+        *effect = Some(view);
+    }
+}
+
 fn light(time: f64) -> Vec2 {
     let phase = (time * 0.18) as f32;
     egui::vec2(0.5 + 0.32 * phase.sin(), 0.5 + 0.24 * (phase * 2.0).sin())
