@@ -292,10 +292,10 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let glass = self.settings.glass != "off";
         #[cfg(target_os = "macos")]
-        glass::blur(&mut self.blur, glass);
+        glass::blur(&mut self.blur, _frame, glass && self.settings.glass_opacity < 1.0);
         if glass {
             let time = if self.settings.glass == "wave" { ctx.input(|i| i.time) } else { 0.0 };
-            glass::paint(ui.painter(), ui.max_rect(), time, term::theme().light);
+            glass::paint(ui.painter(), ui.max_rect(), time, term::theme().light, self.settings.glass_opacity);
             if self.settings.glass == "wave" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
                 ctx.request_repaint_after(Duration::from_millis(33));
             }

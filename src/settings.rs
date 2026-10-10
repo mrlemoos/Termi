@@ -11,6 +11,7 @@ use crate::term::{self, background, foreground};
 pub struct Settings {
     pub notifications: bool,
     pub glass: String,
+    pub glass_opacity: f32,
     pub font_size: u8,
     /// A name from `FONTS`.
     pub font: String,
@@ -22,7 +23,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { glass: "off".into(), notifications: true, font_size: 14, font: FONTS[0].0.into(), theme: term::THEMES[0].name.into(), shell: String::new() }
+        Settings { glass: "off".into(), glass_opacity: 0.86, notifications: true, font_size: 14, font: FONTS[0].0.into(), theme: term::THEMES[0].name.into(), shell: String::new() }
     }
 }
 
@@ -39,13 +40,14 @@ const SF_MONO_REGULAR: &str = "/System/Applications/Utilities/Terminal.app/Conte
 const SF_MONO_BOLD: &str = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SF-Mono-Bold.otf";
 
 /// (key, label). Add a field, a row here and an arm in `get`/`set`/`step` to add an option.
-const ROWS: [(&str, &str); 6] = [
+const ROWS: [(&str, &str); 7] = [
     ("notifications", "notify when an agent finishes or needs you"),
     ("font_size", "font size"),
     ("font", "font"),
     ("theme", "colours"),
     ("shell", "shell for new tabs"),
     ("glass", "translucent light"),
+    ("glass_opacity", "glass opacity (0 clear, 1 solid)"),
 ];
 
 impl Settings {
@@ -56,7 +58,8 @@ impl Settings {
             2 => self.font.clone(),
             3 => self.theme.clone(),
             4 => self.shell.clone(),
-            _ => self.glass.clone(),
+            5 => self.glass.clone(),
+            _ => self.glass_opacity.to_string(),
         }
     }
 
@@ -72,6 +75,13 @@ impl Settings {
             3 => self.theme = v.into(),
             4 => self.shell = v.into(),
             5 if ["off", "wave", "still"].contains(&v) => self.glass = v.into(),
+            6 => {
+                if let Ok(n) = v.parse::<f32>() {
+                    if n.is_finite() {
+                        self.glass_opacity = n.clamp(0.0, 1.0);
+                    }
+                }
+            }
             _ => {},
         }
     }
@@ -92,6 +102,7 @@ impl Settings {
         match row {
             0 => self.notifications = !self.notifications,
             1 => self.set(1, &(self.font_size as i32 + d).to_string()),
+            6 => self.set(6, &(((self.glass_opacity * 100.0).round() + d as f32) / 100.0).to_string()),
             _ => {
                 let opts = Settings::options(row);
                 if opts.is_empty() {
@@ -108,6 +119,7 @@ impl Settings {
         match (row, self.get(row).as_str()) {
             (0, "true") => "[x]".into(),
             (0, _) => "[ ]".into(),
+            (6, _) => format!("‹ {:.2} ›", self.glass_opacity),
             (4, "") => "‹ login shell ›".into(),
             (_, v) => format!("‹ {v} ›"),
         }
@@ -208,8 +220,8 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let s = Settings { glass: "wave".into(), notifications: false, font_size: 18, font: "Menlo".into(), theme: "gruvbox".into(), shell: "/bin/bash".into() };
-        assert_eq!(s.serialize(), "notifications=false\nfont_size=18\nfont=Menlo\ntheme=gruvbox\nshell=/bin/bash\nglass=wave\n");
+        let s = Settings { glass: "wave".into(), glass_opacity: 0.86, notifications: false, font_size: 18, font: "Menlo".into(), theme: "gruvbox".into(), shell: "/bin/bash".into() };
+        assert_eq!(s.serialize(), "notifications=false\nfont_size=18\nfont=Menlo\ntheme=gruvbox\nshell=/bin/bash\nglass=wave\nglass_opacity=0.86\n");
         assert_eq!(Settings::parse(&s.serialize()), s);
         assert_eq!(Settings::parse("junk\nunknown=false"), Settings::default());
         // old files: just the notifications line
@@ -226,6 +238,25 @@ mod tests {
         s.step(5, 1);
         assert_eq!(s.glass, "off");
         assert_eq!(Settings::parse("glass=invalid").glass, "off");
+    }
+
+    #[test]
+    fn glass_opacity_is_bounded_and_persisted() {
+        for (value, expected) in [("-1", 0.0), ("2", 1.0), ("0.37", 0.37), ("NaN", 0.86), ("inf", 0.86), ("bad", 0.86)] {
+            let s = Settings::parse(&format!("glass_opacity={value}"));
+            assert_eq!(s.glass_opacity, expected);
+            assert_eq!(Settings::parse(&s.serialize()), s);
+        }
+        let mut s = Settings::parse("glass_opacity=0");
+        s.step(6, -1);
+        assert_eq!(s.glass_opacity, 0.0);
+        s.step(6, 1);
+        assert_eq!(s.shown(6), "‹ 0.01 ›");
+        s.set(6, "1");
+        s.step(6, 1);
+        assert_eq!(s.glass_opacity, 1.0);
+        s.step(6, -1);
+        assert_eq!(s.shown(6), "‹ 0.99 ›");
     }
 
     #[test]

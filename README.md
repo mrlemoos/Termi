@@ -25,6 +25,8 @@ brew install --cask termi
 | ⌘C / ⌘V | copy selection / paste |
 | ⌘, | settings (↑↓ move, space toggle, esc close). Saved to `~/.config/termi/settings` |
 
+Glass mode supports wave or still light. In settings, glass opacity ranges from 0.0 clear to 1.0 solid; ←→ adjusts by 0.01. The default is 0.86.
+
 ### Editor
 
 | Key | Action |
