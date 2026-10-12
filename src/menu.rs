@@ -106,6 +106,23 @@ pub fn install(ctx: &egui::Context) {
         }
         menus.iter().find(|(m, _)| *m == menu).unwrap().1.addItem(&item);
     }
+    // Native selectors via the responder chain; AppKit appends tiling, full screen and the window list.
+    let window = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Window"));
+    for entry in [Some(("Minimize", sel!(performMiniaturize:), "m")), Some(("Zoom", sel!(performZoom:), "")), None, Some(("Bring All to Front", sel!(arrangeInFront:), ""))] {
+        let item = match entry {
+            Some((title, action, key)) => unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm), &NSString::from_str(title), Some(action), &NSString::from_str(key),
+                )
+            },
+            None => NSMenuItem::separatorItem(mtm),
+        };
+        window.addItem(&item);
+    }
+    let holder = NSMenuItem::new(mtm);
+    holder.setSubmenu(Some(&window));
+    bar.addItem(&holder);
+    NSApplication::sharedApplication(mtm).setWindowsMenu(Some(&window));
     unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(&target)) };
     if NSBundle::mainBundle().bundleIdentifier().is_some() {
         NSUpdateDynamicServices();
