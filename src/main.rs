@@ -24,9 +24,6 @@ use editor::{Editor, Outcome};
 use split::Layout;
 use term::{Cell, Fonts, Tab, background, foreground};
 
-/// Height of the hidden titlebar strip: hover shows traffic lights, drag moves the window.
-const TITLEBAR: f32 = 40.0;
-
 fn main() -> eframe::Result {
     alacritty_terminal::tty::setup_env();
     let _ = std::fs::create_dir_all(agent::state_dir());
@@ -67,7 +64,6 @@ struct App {
     lights: Option<bool>,
     #[cfg(target_os = "macos")]
     blur: Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>>,
-    window_drag: bool,
     scroll_acc: f32,
     last_poll: Instant,
 }
@@ -79,7 +75,7 @@ impl App {
         let mut app = App {
             tabs: Vec::new(), active: 0, screens: Vec::new(), next_id: 1, tree: Default::default(), show_tree: false, tree_focus: false, editor: None,
             settings, settings_open: None, renaming: None, pane_drag: None,
-            lights: None, window_drag: false, scroll_acc: 0.0, last_poll: Instant::now(),
+            lights: None, scroll_acc: 0.0, last_poll: Instant::now(),
             #[cfg(target_os = "macos")]
             blur: None,
         };
@@ -97,15 +93,19 @@ impl App {
     fn new_tab(&mut self, ctx: &egui::Context, cwd: PathBuf, split: Option<bool>) {
         match Tab::spawn(self.next_id, cwd, &self.settings.shell, ctx) {
             Ok(tab) => {
-                match (split, self.tabs.get(self.active)) {
+                let splitting = match (split, self.tabs.get(self.active).map(|t| t.id)) {
                     (Some(side), Some(at)) => {
-                        let at = at.id;
                         self.screens = std::mem::take(&mut self.screens).into_iter().map(|l| l.split(at, tab.id, side, false)).collect();
+                        true
                     }
-                    _ => self.screens.push(Layout::Leaf(tab.id)),
-                }
-                self.tabs.push(tab);
-                self.active = self.tabs.len() - 1;
+                    _ => {
+                        self.screens.push(Layout::Leaf(tab.id));
+                        false
+                    }
+                };
+                let at = tab_slot(self.active, self.tabs.len(), splitting);
+                self.tabs.insert(at, tab);
+                self.active = at;
                 self.next_id += 1;
             }
             Err(e) => eprintln!("termi: failed to spawn shell: {e}"),
@@ -179,6 +179,11 @@ impl App {
     }
 }
 
+/// Split inserts the new tab immediately after the active one. A new screen appends.
+fn tab_slot(active: usize, len: usize, split: bool) -> usize {
+    if split { active.saturating_add(1).min(len) } else { len }
+}
+
 /// One key into the rename draft: Some(true) commit, Some(false) cancel.
 fn rename_key(buf: &mut String, ev: &egui::Event) -> Option<bool> {
     match ev {
@@ -228,10 +233,10 @@ fn install_fonts(ctx: &egui::Context, name: &str) {
         }
     }
     defs.families.insert(FontFamily::Name("bold".into()), bold);
-    // Except tab titles: the system font (SF), like iTerm, semibold at its small-text optical size.
+    // Except tab titles: the system font (SF), at the text optical size.
     let mut tab = vec!["meslo".into()];
     if let Ok(b) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
-        let tweak = egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([("wght", 600.0), ("opsz", 17.0)]), ..Default::default() };
+        let tweak = egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([("wght", TAB_WGHT), ("opsz", 13.0)]), ..Default::default() };
         defs.font_data.insert("sf".into(), Arc::new(egui::FontData::from_owned(b).tweak(tweak)));
         tab.insert(0, "sf".into());
     }
@@ -307,10 +312,10 @@ impl eframe::App for App {
             }
         }
         let glass = self.settings.glass != "off";
+        let time = if self.settings.glass == "wave" { ctx.input(|i| i.time) } else { 0.0 };
         #[cfg(target_os = "macos")]
         glass::blur(&mut self.blur, _frame, glass && self.settings.glass_opacity < 1.0);
         if glass {
-            let time = if self.settings.glass == "wave" { ctx.input(|i| i.time) } else { 0.0 };
             glass::paint(ui.painter(), ui.max_rect(), time, term::theme().light, self.settings.glass_opacity);
             if self.settings.glass == "wave" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
                 ctx.request_repaint_after(Duration::from_millis(33));
@@ -333,7 +338,8 @@ impl eframe::App for App {
         self.active = self.active.min(self.tabs.len() - 1);
         let alive: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
         self.screens = std::mem::take(&mut self.screens).into_iter().filter_map(|l| l.retain(&|id| alive.contains(&id))).collect();
-        if self.last_poll.elapsed() > Duration::from_secs(1) {
+        let poll_every = if self.tabs.iter().any(|t| t.agent.is_some()) { Duration::from_millis(300) } else { Duration::from_secs(1) };
+        if self.last_poll.elapsed() > poll_every {
             let before: Vec<(State, bool)> = self.tabs.iter().map(|t| (t.state, t.done)).collect();
             self.tabs.iter_mut().for_each(Tab::poll);
             let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
@@ -350,73 +356,49 @@ impl eframe::App for App {
             self.last_poll = Instant::now();
         }
 
-        // you're looking at the active tab, so its "done" has been seen
-        if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
-            self.tabs[self.active].done = false;
-        }
-
-        let show = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y < TITLEBAR);
+        let cell = self.cell(&ctx);
+        let font = self.fonts().regular;
+        let tab_font = FontId::new(tab_title_size(font.size), FontFamily::Name("tab".into()));
+        let metrics = tab_metrics(&ctx, &tab_font);
+        let show = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y < metrics.bar_h);
         if self.lights != Some(show) {
             set_traffic_lights(show);
             self.lights = Some(show);
         }
 
-        let cell = self.cell(&ctx);
-        let font = self.fonts().regular;
-
-        // ---- status line: ⌘n badges, tmux style ----
-        egui::Panel::bottom("status").exact_size(cell.h + 12.0).show_separator_line(false).frame(egui::Frame::NONE.fill(panel_fill).inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 6 })).show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            let bottom = ui.max_rect().bottom();
-            ui.horizontal(|ui| {
-                for (i, tab) in self.tabs.iter().enumerate() {
-                    let glyph = match (tab.agent.is_some(), tab.state, tab.done) {
-                        (true, State::NeedsInput, _) => "! ".into(),
-                        (true, State::Idle, true) => "✓ ".into(),
-                        _ => String::new(),
-                    };
-                    let label = match &self.renaming {
-                        Some(buf) if i == self.active => format!("{buf}█"),
-                        _ => tab.label(),
-                    };
-                    let mut text = egui::RichText::new(format!("    ⌘{} {glyph}{label}    ", i + 1)).font(FontId::new(font.size + 1.0, FontFamily::Name("tab".into())));
-                    let fill = match (i == self.active, tab.state) {
-                        (true, State::Working) if tab.agent.is_some() => Some(pulse()),
-                        (true, _) => Some(foreground()),
-                        _ => None,
-                    };
-                    text = match (i == self.active, tab.state) {
-                        (true, _) => text.color(background()),
-                        (false, State::Working) if tab.agent.is_some() => text.color(pulse()),
-                        (false, State::NeedsInput) => text.color(Color32::from_rgb(0xcd, 0xcd, 0x00)),
-                        (false, State::Idle) if tab.done => text.color(Color32::from_rgb(0x00, 0xcd, 0x00)),
-                        _ => text.color(Color32::from_gray(160)),
-                    };
-                    // badge fill runs down to the window's bottom edge, painted under the label
-                    let bg = ui.painter().add(egui::Shape::Noop);
-                    let resp = ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false));
-                    if let Some(c) = fill {
-                        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.with_min_y(resp.rect.top() - 6.0).with_max_y(bottom + 6.0), 0.0, c));
-                    }
-                    if resp.clicked() {
-                        self.active = i;
-                    }
-                    if resp.double_clicked() {
-                        self.renaming = Some(tab.label());
-                    }
-                    if let Some(a) = tab.agent {
-                        let cols = a.sprite(0).iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
-                        let (r, _) = ui.allocate_exact_size(vec2((cols / 3.0 + 1.0) * cell.w, cell.h), Sense::hover());
-                        mascot(ui.painter(), r.min + vec2(cell.w * 0.5, 0.0), &cell, font.size, a, tab.state);
-                    }
+        let cwd = tilde(&self.tabs[self.active].cwd);
+        let chips: Vec<Chip> = self.tabs.iter().enumerate().map(|(i, tab)| {
+            let glyph = match (tab.agent.is_some(), tab.state, tab.done) {
+                (true, State::NeedsInput, _) => "! ",
+                (true, State::Idle, true) => "✓ ",
+                _ => "",
+            };
+            let name = match &self.renaming {
+                Some(buf) if i == self.active => format!("{buf}█"),
+                _ => tab.label(),
+            };
+            Chip { label: format!("⌘{} {glyph}{name}", i + 1), active: i == self.active, agent: tab.agent, state: tab.state, done: tab.done }
+        }).collect();
+        let bright = term::theme().light;
+        let hit = egui::Panel::top("tabs")
+            .exact_size(metrics.bar_h)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 0 }))
+            .show(ui, |ui| tab_strip(ui, &chips, &metrics, &tab_font, bright, show, &cwd, &font))
+            .inner;
+        match hit {
+            Some(TabHit::Select(i)) => {
+                if self.renaming.is_some() && i != self.active {
+                    self.renaming = None;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // clear the window's rounded corner
-                    ui.add_space(cell.w * 2.0);
-                    ui.label(egui::RichText::new(format!("{}", tilde(&self.tabs[self.active].cwd))).font(font.clone()).color(Color32::from_gray(120)));
-                });
-            });
-        });
+                self.active = i;
+            }
+            Some(TabHit::Rename(i)) => {
+                self.active = i;
+                self.renaming = Some(self.tabs[i].label());
+            }
+            None => {}
+        }
 
         // ---- tree ----
         if self.show_tree {
@@ -424,7 +406,7 @@ impl eframe::App for App {
             egui::Panel::left("tree")
                 .resizable(true)
                 .default_size(260.0)
-                .frame(egui::Frame::NONE.fill(panel_fill).inner_margin(egui::Margin { left: 6, right: 6, top: TITLEBAR as i8, bottom: 0 }))
+                .frame(egui::Frame::NONE.fill(panel_fill).inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 0 }))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
@@ -444,7 +426,7 @@ impl eframe::App for App {
 
         let central = egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(cursor) = &mut self.settings_open {
-                ui.add_space(TITLEBAR);
+                ui.add_space(4.0);
                 let before = self.settings.clone();
                 if !self.settings.show(ui, &font, cursor) {
                     self.settings_open = None;
@@ -458,7 +440,7 @@ impl eframe::App for App {
             if let Some(ed) = &mut self.editor {
                 let tab = &self.tabs[self.active];
                 let shown = ed.path.strip_prefix(&tab.cwd).unwrap_or(&ed.path).to_string_lossy().into_owned();
-                ui.add_space(TITLEBAR);
+                ui.add_space(4.0);
                 match ed.show(ui, &font, &shown) {
                     Outcome::Stay => {}
                     Outcome::Close => self.editor = None,
@@ -478,7 +460,7 @@ impl eframe::App for App {
             let ids: Vec<egui::Id> = panes.iter().map(|&(id, _)| pane_id(id)).collect();
             for &(id, r) in &panes {
                 let Some(i) = self.tabs.iter().position(|t| t.id == id) else { continue };
-                self.terminal(ui, &ctx, &cell, show, i, r, r.min.y <= area.min.y, &ids);
+                self.terminal(ui, &ctx, &cell, i, r, &ids);
             }
             // ⌘ held: the whole screen grabs the mouse; drag a pane onto another's edge to re-split it there.
             // Without ⌘ the panes keep the mouse for text selection.
@@ -540,19 +522,19 @@ impl eframe::App for App {
             painter.text(pos + vec2(12.0, 4.0), egui::Align2::LEFT_TOP, format!(" {name}"), font.clone(), background());
         }
 
-        let busy = self.tabs.iter().any(|t| t.agent.is_some() && t.state == State::Working);
+        let busy = self.tabs.iter().any(|t| t.agent.is_some() && matches!(t.state, State::Working | State::NeedsInput));
         ctx.request_repaint_after(Duration::from_millis(if busy { 33 } else { 1000 }));
     }
 }
 
 impl App {
-    /// One pane: tab `i` in `rect`. `top` panes leave room for the titlebar; `panes` are the screen's pane ids.
-    fn terminal(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, cell: &Cell, lights: bool, i: usize, rect: egui::Rect, top: bool, panes: &[egui::Id]) {
+    /// One pane: tab `i` in `rect`. `panes` are the screen's pane ids.
+    fn terminal(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, cell: &Cell, i: usize, rect: egui::Rect, panes: &[egui::Id]) {
         let resp = ui.interact(rect, pane_id(self.tabs[i].id), Sense::click_and_drag());
         if resp.clicked() || resp.drag_started() {
             self.active = i;
         }
-        let pad = if top { TITLEBAR } else { 4.0 };
+        let pad = 4.0;
         let origin = rect.min + vec2(4.0, pad);
         let is_active = i == self.active;
         let fonts = self.fonts();
@@ -571,13 +553,20 @@ impl App {
             let app_cursor = tab.term.lock().mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
             for ev in ctx.input(|i| i.events.clone()) {
                 match ev {
-                    egui::Event::Text(s) => tab.paste_raw(&s),
+                    egui::Event::Text(s) => {
+                        tab.done = false;
+                        tab.paste_raw(&s);
+                    }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
                         if let Some(b) = term::key_bytes(key, modifiers, app_cursor) {
+                            tab.done = false;
                             tab.paste_raw(std::str::from_utf8(&b).unwrap_or(""));
                         }
                     }
-                    egui::Event::Paste(s) => tab.paste(&s),
+                    egui::Event::Paste(s) => {
+                        tab.done = false;
+                        tab.paste(&s);
+                    }
                     egui::Event::Copy => {
                         if let Some(s) = tab.term.lock().selection_to_string() {
                             ctx.copy_text(s);
@@ -604,17 +593,11 @@ impl App {
             }
         }
 
-        // mouse: titlebar strip drags the window, elsewhere selects text
         if resp.drag_started() {
             let start = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.min);
-            self.window_drag = lights && start.y < TITLEBAR;
-            if self.window_drag {
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            } else {
-                tab.start_selection(start, origin, cell);
-            }
+            tab.start_selection(start, origin, cell);
         }
-        if resp.dragged() && !self.window_drag {
+        if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
                 tab.update_selection(p, origin, cell);
             }
@@ -646,20 +629,427 @@ fn pane_id(tab: u64) -> egui::Id {
     egui::Id::new(("pane", tab))
 }
 
-/// Tamagotchi: the 3-row sprite squeezed into one status-line row. Walks while working.
-fn mascot(painter: &egui::Painter, top_left: Pos2, cell: &Cell, size: f32, a: &dyn agent::Agent, state: State) {
-    let font = FontId::new(size / 3.0, FontFamily::Monospace);
-    let frame = if state == State::Working { epoch_ms() / 250 } else { 0 };
-    let [r, g, b] = a.color();
-    for (i, line) in a.sprite(frame).iter().enumerate() {
-        let pos = top_left + vec2(0.0, i as f32 * cell.h / 3.0);
-        painter.text(pos, egui::Align2::LEFT_TOP, *line, font.clone(), Color32::from_rgb(r, g, b));
+/// SF variable weight for tab titles. 400 is regular.
+const TAB_WGHT: f32 = 400.0;
+
+fn tab_title_size(terminal: f32) -> f32 {
+    (terminal - 2.0).max(11.0)
+}
+
+fn chip_height(text_h: f32) -> f32 {
+    text_h + 6.0
+}
+
+/// Claude Code's Clawd. `#` body, `o` eyes, `.` empty. Frame 1 only moves the feet.
+fn clawd_rows(frame: usize) -> [&'static str; 5] {
+    let feet = if frame % 2 == 0 { ".#.#...#.#." } else { "#.#.....#.#" };
+    [".#########.", "##o#####o##", "###########", ".#########.", feet]
+}
+
+fn mascot_frame(state: State, now_ms: usize) -> usize {
+    if state == State::Working { (now_ms / 160) % 2 } else { 0 }
+}
+
+/// Official Grok mark, already at its tilted angle. `#` is the disc.
+const GROK: [&str; 23] = [
+    ".......................",
+    ".....................#.",
+    "....................#..",
+    "........#######....##..",
+    ".......#########..##...",
+    ".....#####.......###...",
+    ".....###.........###...",
+    "....###.........####...",
+    "....##.........#####...",
+    "...###........#...##...",
+    "...###.......#....##...",
+    "...##.......#.....##...",
+    "...##......#......##...",
+    "...###............##...",
+    "....##...........###...",
+    "....###..........##....",
+    "....###.........###....",
+    "....##........####.....",
+    "....#..##########......",
+    "...#....########.......",
+    "..#....................",
+    ".......................",
+    ".......................",
+];
+
+/// One turn of the Grok mark. The phase stays inside a few seconds so it still moves on a Unix clock.
+fn saturn_spin(state: State, now_ms: usize) -> f32 {
+    if state == State::Working { (now_ms % 1600) as f32 / 1600.0 * std::f32::consts::TAU } else { 0.0 }
+}
+
+/// 0 is the terminal background, 1 is the foreground. Working swings between them.
+fn contrast_mix(state: State, now_ms: usize) -> f32 {
+    if state == State::Working {
+        ((now_ms % 900) as f32 / 900.0 * std::f32::consts::TAU).sin() * 0.5 + 0.5
+    } else {
+        1.0
+    }
+}
+
+/// Vertical gradient offset. Idle is still. Working scrolls.
+fn codex_shift(state: State, now_ms: usize) -> f32 {
+    if state == State::Working { (now_ms % 1400) as f32 / 1400.0 } else { 0.0 }
+}
+
+fn mark_kind(name: &str) -> Option<&'static str> {
+    match name {
+        "claude" => Some("crab"),
+        "codex" => Some("logo"),
+        "grok" => Some("saturn"),
+        "cursor" => Some("contrast"),
+        _ => None,
+    }
+}
+
+struct TabMetrics {
+    chip_h: f32,
+    bar_h: f32,
+}
+
+struct Chip {
+    label: String,
+    active: bool,
+    agent: Option<&'static dyn agent::Agent>,
+    state: State,
+    done: bool,
+}
+
+enum TabHit {
+    Select(usize),
+    Rename(usize),
+}
+
+fn tab_metrics(ctx: &egui::Context, title: &FontId) -> TabMetrics {
+    let text_h = ctx.fonts_mut(|f| f.row_height(title));
+    let chip_h = chip_height(text_h);
+    TabMetrics { chip_h, bar_h: chip_h + 8.0 }
+}
+
+fn chip_colour(active: bool, state: State, agent: bool, done: bool) -> Color32 {
+    match (active, agent, state, done) {
+        (_, true, State::Working, _) => pulse(),
+        (false, _, State::NeedsInput, _) => Color32::from_rgb(0xcd, 0xcd, 0x00),
+        (false, _, State::Idle, true) => Color32::from_rgb(0x00, 0xcd, 0x00),
+        (true, _, _, _) => foreground(),
+        _ => Color32::from_gray(160),
+    }
+}
+
+/// Left inset that clears the traffic lights. Constant so the row does not jump on hover.
+fn tab_inset(_lights: bool) -> f32 {
+    80.0
+}
+
+/// Liquid-glass tab row. Dragging empty glass moves the window. Returns the tab that was clicked.
+fn tab_strip(ui: &mut egui::Ui, chips: &[Chip], metrics: &TabMetrics, label_font: &FontId, bright: bool, lights: bool, cwd: &str, cwd_font: &FontId) -> Option<TabHit> {
+    let bar = ui.max_rect();
+    glass::bar(ui.painter(), bar, bright);
+    let drag = ui.interact(bar, egui::Id::new("tab-bar"), Sense::drag());
+    if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    let gap = ((bar.height() - metrics.chip_h) * 0.5).max(0.0);
+    ui.add_space(gap);
+    let mut hit = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add_space(tab_inset(lights));
+        for (i, chip) in chips.iter().enumerate() {
+            let colour = chip_colour(chip.active, chip.state, chip.agent.is_some(), chip.done);
+            let galley = ui.painter().layout_no_wrap(chip.label.clone(), label_font.clone(), colour);
+            let full = if chip.agent.is_some() { (metrics.chip_h - 4.0).max(8.0) } else { 0.0 };
+            let (mascot_w, mascot_h) = if chip.agent.is_some_and(|a| a.name() == "claude") {
+                let h = full * 0.72;
+                (h * 11.0 / 5.0, h)
+            } else {
+                (full, full)
+            };
+            let lead = if chip.agent.is_some() { 5.0 + mascot_w + 4.0 } else { 10.0 };
+            let (rect, resp) = ui.allocate_exact_size(vec2(lead + galley.size().x + 12.0, metrics.chip_h), Sense::click());
+            glass::chip(ui.painter(), rect, bright, chip.active);
+            let mut x = rect.left() + if chip.agent.is_some() { 5.0 } else { 10.0 };
+            if let Some(a) = chip.agent {
+                paint_mascot(ui.painter(), Pos2::new(x, rect.center().y - mascot_h * 0.5), mascot_w, mascot_h, a, chip.state, chip.done);
+                x += mascot_w + 4.0;
+            }
+            ui.painter().galley(Pos2::new(x, rect.center().y - galley.size().y * 0.5), galley, colour);
+            if resp.double_clicked() {
+                hit = Some(TabHit::Rename(i));
+            } else if resp.clicked() {
+                hit = Some(TabHit::Select(i));
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(16.0);
+            ui.label(egui::RichText::new(cwd).font(cwd_font.clone()).color(Color32::from_gray(120)));
+        });
+    });
+    hit
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+    Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
+}
+
+/// Lavender at 0, deep blue at 1. `shift` scrolls it.
+fn codex_gradient(t: f32) -> Color32 {
+    let t = t.rem_euclid(1.0);
+    let lavender = Color32::from_rgb(196, 181, 253);
+    let mid = Color32::from_rgb(99, 102, 241);
+    let blue = Color32::from_rgb(37, 99, 235);
+    if t < 0.5 { mix(lavender, mid, t / 0.5) } else { mix(mid, blue, (t - 0.5) / 0.5) }
+}
+
+/// Idle, working, needs-input, done. Needs-input wins; done only shows once the turn has stopped.
+fn mascot_mood(state: State, done: bool) -> &'static str {
+    match state {
+        State::NeedsInput => "input",
+        State::Working => "working",
+        State::Idle if done => "done",
+        State::Idle => "idle",
+    }
+}
+
+fn accent(mood: &str) -> Option<Color32> {
+    match mood {
+        "input" => Some(Color32::from_rgb(0xcd, 0xcd, 0x00)),
+        "done" => Some(Color32::from_rgb(0x00, 0xcd, 0x00)),
+        _ => None,
+    }
+}
+
+fn paint_mascot(painter: &egui::Painter, origin: Pos2, w: f32, h: f32, a: &dyn agent::Agent, state: State, done: bool) {
+    let now = epoch_ms();
+    let mood = mascot_mood(state, done);
+    let frame = if mood == "working" { mascot_frame(state, now) } else { 0 };
+    let centre = origin + vec2(w * 0.5, h * 0.5);
+    match mark_kind(a.name()) {
+        Some("crab") => {
+            let rows = clawd_rows(frame);
+            let pix_w = w / 11.0;
+            let pix_h = h / 5.0;
+            let y0 = origin.y - if frame == 1 { pix_h * 0.2 } else { 0.0 };
+            let rgb = a.color();
+            let body = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let eye = accent(mood).unwrap_or(Color32::from_rgb(28, 18, 16));
+            for (y, row) in rows.iter().enumerate() {
+                for (x, ch) in row.chars().enumerate() {
+                    let colour = match ch {
+                        '#' => body,
+                        'o' => eye,
+                        _ => continue,
+                    };
+                    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(origin.x + x as f32 * pix_w, y0 + y as f32 * pix_h), vec2(pix_w, pix_h)), 0.0, colour);
+                }
+            }
+        }
+        Some("logo") => paint_codex(painter, centre, w.min(h), if mood == "working" { codex_shift(state, now) } else { 0.0 }, accent(mood)),
+        Some("saturn") => paint_grok(painter, origin, w, h, saturn_spin(state, now)),
+        Some("contrast") => paint_cursor(painter, centre, w.min(h), mood, if mood == "working" { contrast_mix(state, now) } else { 0.0 }),
+        _ => {}
+    }
+}
+
+/// Cursor's mark: a pointer inside a rounded square. Working swaps the square and the pointer between background and foreground.
+fn paint_cursor(painter: &egui::Painter, centre: Pos2, s: f32, mood: &str, mix_t: f32) {
+    let side = s * 0.78;
+    let (fill, ink) = match mood {
+        "working" => (mix(background(), foreground(), mix_t), mix(foreground(), background(), mix_t)),
+        "input" => (Color32::from_rgb(48, 40, 0), Color32::from_rgb(0xcd, 0xcd, 0x00)),
+        "done" => (Color32::from_rgb(0, 48, 16), Color32::from_rgb(0x00, 0xcd, 0x00)),
+        _ => (Color32::from_rgb(24, 24, 28), foreground()),
+    };
+    let rect = egui::Rect::from_center_size(centre, vec2(side, side));
+    painter.rect_filled(rect, side * 0.22, fill);
+    painter.rect_stroke(rect, side * 0.22, egui::Stroke::new((s * 0.06).max(1.0), ink), egui::StrokeKind::Inside);
+    let tip = centre + vec2(-s * 0.06, -s * 0.16);
+    let left = centre + vec2(-s * 0.18, s * 0.14);
+    let right = centre + vec2(s * 0.10, s * 0.02);
+    painter.add(egui::Shape::convex_polygon(vec![tip, left, right], ink, egui::Stroke::NONE));
+}
+
+fn paint_codex(painter: &egui::Painter, centre: Pos2, s: f32, shift: f32, ring: Option<Color32>) {
+    let petal = s * 0.34;
+    let orbit = s * 0.20;
+    let colour_at = |dy: f32| codex_gradient((dy / s + 0.5) + shift);
+    for i in 0..6 {
+        let a = i as f32 * std::f32::consts::TAU / 6.0;
+        let pos = centre + vec2(a.cos(), a.sin()) * orbit;
+        painter.circle_filled(pos, petal, colour_at(pos.y - centre.y));
+    }
+    painter.circle_filled(centre, petal * 0.92, colour_at(0.0));
+    let sw = (s * 0.09).max(1.2);
+    let white = egui::Stroke::new(sw, Color32::WHITE);
+    let a = centre + vec2(-s * 0.18, -s * 0.13);
+    let b = centre + vec2(-s * 0.02, s * 0.01);
+    let c = centre + vec2(-s * 0.18, s * 0.15);
+    painter.line_segment([a, b], white);
+    painter.line_segment([b, c], white);
+    painter.rect_filled(egui::Rect::from_center_size(centre + vec2(s * 0.16, s * 0.04), vec2(s * 0.22, sw)), sw * 0.5, Color32::WHITE);
+    if let Some(c) = ring {
+        painter.circle_stroke(centre, s * 0.48, egui::Stroke::new((s * 0.06).max(1.0), c));
+    }
+}
+
+/// The Grok mark, white. `spin` is extra rotation; idle is the logo's own angle.
+fn paint_grok(painter: &egui::Painter, origin: Pos2, w: f32, h: f32, spin: f32) {
+    let n = GROK.len() as f32;
+    let pix = (w / n).min(h / n);
+    let x0 = origin.x + (w - pix * n) * 0.5;
+    let y0 = origin.y + (h - pix * n) * 0.5;
+    let centre = Pos2::new(x0 + pix * n * 0.5, y0 + pix * n * 0.5);
+    let (cs, sn) = (spin.cos(), spin.sin());
+    for (y, row) in GROK.iter().enumerate() {
+        for (x, ch) in row.chars().enumerate() {
+            if ch != '#' {
+                continue;
+            }
+            let dx = (x as f32 + 0.5) * pix - pix * n * 0.5;
+            let dy = (y as f32 + 0.5) * pix - pix * n * 0.5;
+            let p = centre + vec2(dx * cs - dy * sn, dx * sn + dy * cs);
+            painter.rect_filled(egui::Rect::from_center_size(p, vec2(pix + 0.4, pix + 0.4)), 0.0, Color32::WHITE);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_lands_beside_the_active_tab() {
+        assert_eq!(tab_slot(0, 3, true), 1);
+        assert_eq!(tab_slot(1, 3, true), 2);
+        assert_eq!(tab_slot(2, 3, true), 3);
+        assert_eq!(tab_slot(0, 3, false), 3);
+        assert_eq!(tab_slot(0, 0, false), 0);
+        let mut ids = vec![1, 2, 4];
+        ids.insert(tab_slot(0, ids.len(), true), 3);
+        assert_eq!(ids, vec![1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn tabs_do_not_shift_for_traffic_lights() {
+        assert_eq!(tab_inset(false), tab_inset(true));
+    }
+
+    #[test]
+    fn tab_title_is_regular_and_the_pill_is_one_line() {
+        assert_eq!(TAB_WGHT, 400.0);
+        assert!(tab_title_size(14.0) < 14.0);
+        let h = chip_height(16.0);
+        assert!(h > 16.0 && h < 32.0, "{h}");
+    }
+
+    #[test]
+    fn each_provider_has_its_own_mark() {
+        let mut seen = std::collections::HashSet::new();
+        for a in agent::AGENTS {
+            let kind = mark_kind(a.name()).unwrap_or_else(|| panic!("{}", a.name()));
+            assert!(seen.insert(kind), "{kind}");
+        }
+        assert_eq!(mark_kind("claude"), Some("crab"));
+        assert_eq!(mark_kind("grok"), Some("saturn"));
+        assert_ne!(mark_kind("grok"), Some("slash"));
+        assert!(GROK.iter().any(|row| row.contains('#')));
+        assert_eq!(saturn_spin(State::Idle, 0), 0.0);
+        assert_eq!(saturn_spin(State::Idle, 0), saturn_spin(State::Idle, 4000));
+        assert_ne!(saturn_spin(State::Working, 0), saturn_spin(State::Working, 1000));
+        // the clock is ~1e12 ms; f32 cannot see a few hundred milliseconds there
+        assert_ne!(saturn_spin(State::Working, 1_763_000_000_000), saturn_spin(State::Working, 1_763_000_000_400));
+        assert_ne!(codex_shift(State::Working, 1_763_000_000_000), codex_shift(State::Working, 1_763_000_000_700));
+        assert_ne!(contrast_mix(State::Working, 1_763_000_000_000), contrast_mix(State::Working, 1_763_000_000_262));
+        assert_eq!(codex_shift(State::Idle, 2000), 0.0);
+        assert!(codex_shift(State::Working, 700) > 0.0);
+        assert_eq!(contrast_mix(State::Idle, 900), 1.0);
+        assert_ne!(contrast_mix(State::Working, 0), contrast_mix(State::Working, 262));
+        let lum = |name: &str| agent::AGENTS.iter().find(|a| a.name() == name).unwrap().color().iter().map(|c| *c as u16).sum::<u16>();
+        assert!(lum("grok") > 600);
+        assert!(lum("claude") <= 600);
+    }
+
+    #[test]
+    fn mascot_moods_cover_input_and_done() {
+        assert_eq!(mascot_mood(State::Idle, false), "idle");
+        assert_eq!(mascot_mood(State::Working, false), "working");
+        assert_eq!(mascot_mood(State::NeedsInput, false), "input");
+        assert_eq!(mascot_mood(State::Idle, true), "done");
+        assert_eq!(mascot_mood(State::NeedsInput, true), "input");
+    }
+
+    #[test]
+    fn mascots_walk_only_while_working() {
+        assert_eq!(mascot_frame(State::Idle, 500), 0);
+        assert_eq!(mascot_frame(State::NeedsInput, 500), 0);
+        assert_eq!(mascot_frame(State::Working, 0), 0);
+        assert_eq!(mascot_frame(State::Working, 160), 1);
+        assert_ne!(mascot_frame(State::Working, 0), mascot_frame(State::Working, 160));
+    }
+
+    #[test]
+    fn claude_mascot_is_clawd() {
+        let idle = clawd_rows(0);
+        assert_eq!(idle[0], ".#########.");
+        assert_eq!(idle[1], "##o#####o##");
+        assert_eq!(idle[4], ".#.#...#.#.");
+        let step = clawd_rows(1);
+        assert_eq!(&step[..4], &idle[..4]);
+        assert_ne!(step[4], idle[4]);
+        assert_eq!(step[4].chars().filter(|c| *c == '#').count(), 4);
+    }
+
+    #[test]
+    fn chip_colour_keeps_state_readable() {
+        let _theme = term::THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        term::set_theme("xterm");
+        assert_eq!(chip_colour(true, State::Idle, false, false), foreground());
+        assert_eq!(chip_colour(false, State::NeedsInput, true, false), Color32::from_rgb(0xcd, 0xcd, 0x00));
+        assert_eq!(chip_colour(false, State::Idle, true, true), Color32::from_rgb(0x00, 0xcd, 0x00));
+        assert_eq!(chip_colour(false, State::Idle, false, false), Color32::from_gray(160));
+        term::set_theme("xterm");
+    }
+
+    #[test]
+    fn tab_bar_shows_every_provider_mascot() {
+        let _theme = term::THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        term::set_theme("xterm");
+        let agent = |name: &str| agent::AGENTS.iter().copied().find(|a| a.name() == name);
+        let chips = vec![
+            Chip { label: "⌘1 claude".into(), active: true, agent: agent("claude"), state: State::Idle, done: false },
+            Chip { label: "⌘2 zsh".into(), active: false, agent: None, state: State::Idle, done: false },
+            Chip { label: "⌘3 codex".into(), active: false, agent: agent("codex"), state: State::Idle, done: false },
+            Chip { label: "⌘4 ! grok".into(), active: false, agent: agent("grok"), state: State::NeedsInput, done: false },
+            Chip { label: "⌘5 ✓ cursor".into(), active: false, agent: agent("cursor"), state: State::Idle, done: true },
+        ];
+        // set_fonts applies on the next frame, so the first pass only installs them.
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(980.0, 52.0)).build_ui_state(
+            move |ui, seen: &mut bool| {
+                apply(ui.ctx(), &settings::Settings::default());
+                if !*seen {
+                    *seen = true;
+                    return;
+                }
+                ui.painter().rect_filled(ui.max_rect(), 0.0, background());
+                let mono = FontId::monospace(14.0);
+                let label = FontId::new(tab_title_size(14.0), FontFamily::Name("tab".into()));
+                let metrics = tab_metrics(ui.ctx(), &label);
+                egui::Panel::top("tabs").exact_size(metrics.bar_h).show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
+                    tab_strip(ui, &chips, &metrics, &label, false, false, "~/src", &mono);
+                });
+            },
+            false,
+        );
+        h.run();
+        h.snapshot("tab_bar");
+        term::set_theme("xterm");
+    }
 
     #[test]
     fn rename_key_edits_commits_cancels() {

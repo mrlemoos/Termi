@@ -24,7 +24,7 @@ Agent notifications use Termi's name and icon. macOS asks for permission when Te
 | Key | Action |
 |-----|--------|
 | ⌘T / ⌘W | new / close tab |
-| ⌘1…⌘9 | jump to tab (the status line always shows them) |
+| ⌘1…⌘9 | jump to tab (the top bar shows them) |
 | ⌘B | file tree. Click a file to open it, drag it onto the terminal to insert `@path` |
 | ⌘C / ⌘V | copy selection / paste |
 | ⌘, | settings (↑↓ move, space toggle, esc close). Saved to `~/.config/termi/settings` |

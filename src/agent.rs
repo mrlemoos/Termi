@@ -16,17 +16,17 @@ pub trait Agent: Sync {
     // ponytail: string heuristics, tune when an agent changes its TUI copy.
     fn busy_marks(&self) -> &'static [&'static str];
     fn ask_marks(&self) -> &'static [&'static str];
-    /// Two animation frames; frame 1 only shows while working.
-    fn sprite(&self, frame: usize) -> [&'static str; 3];
 
     fn busy(&self, screen: &str) -> bool {
-        self.busy_marks().iter().any(|m| screen.contains(m))
+        let lower = screen.to_ascii_lowercase();
+        self.busy_marks().iter().any(|m| lower.contains(&m.to_ascii_lowercase()))
     }
 
     fn read_screen(&self, screen: &str) -> Option<State> {
-        if self.ask_marks().iter().any(|m| screen.contains(m)) {
+        let lower = screen.to_ascii_lowercase();
+        if self.ask_marks().iter().any(|m| lower.contains(&m.to_ascii_lowercase())) {
             Some(State::NeedsInput)
-        } else if self.busy(screen) {
+        } else if self.busy(screen) || screen_spins(screen) {
             Some(State::Working)
         } else {
             None
@@ -37,6 +37,25 @@ pub trait Agent: Sync {
     fn file_ref(&self, path: &str) -> String {
         format!("@{path} ")
     }
+}
+
+/// A footer line that means the turn is still running. "Not responding" is the idle status and must not match.
+fn grok_live_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.contains("not responding") {
+        return false;
+    }
+    line.contains("thinking...")
+        || line.contains("thinking…")
+        || line == "thinking"
+        || line.contains("responding")
+        || line.contains("running tool")
+        || line.contains("running:")
+}
+
+/// Braille and star spinners mean the agent is mid-turn even when the status words differ.
+fn screen_spins(screen: &str) -> bool {
+    screen.contains(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
 }
 
 /// argv[0] basename starts with `bin`, or argv[0] is a JS runtime whose script path mentions `bin`.
@@ -69,32 +88,35 @@ impl Agent for Claude {
                 && words.next().is_some_and(|w| w.ends_with('…'))
         })
     }
-    fn sprite(&self, f: usize) -> [&'static str; 3] {
-        [[" ▐▛███▜▌ ", "▝▜█████▛▘", "  ▘▘ ▝▝  "], [" ▐▛███▜▌ ", "▝▜█████▛▘", " ▝▘  ▘▝  "]][f % 2]
-    }
 }
 
 impl Agent for Codex {
     fn name(&self) -> &'static str { "codex" }
     fn color(&self) -> [u8; 3] { [0xe8, 0xe8, 0xe8] }
     fn matches(&self, cmd: &str) -> bool { runs(cmd, "codex") }
-    fn busy_marks(&self) -> &'static [&'static str] { &["esc to interrupt"] }
-    fn ask_marks(&self) -> &'static [&'static str] { &["Allow command", "Would you like to run", "approve"] }
-    fn sprite(&self, f: usize) -> [&'static str; 3] {
-        // `>_` prompt, cursor blinks
-        [["█▙▖     ", " ▝██    ", "█▛▘ ▄▄▄ "], ["█▙▖     ", " ▝██    ", "█▛▘     "]][f % 2]
-    }
+    fn busy_marks(&self) -> &'static [&'static str] { &["esc to interrupt", "working"] }
+    fn ask_marks(&self) -> &'static [&'static str] { &["Allow command", "Would you like to run", "approve", "yes, proceed"] }
 }
 
 impl Agent for Grok {
     fn name(&self) -> &'static str { "grok" }
     fn color(&self) -> [u8; 3] { [0xff, 0xff, 0xff] }
     fn matches(&self, cmd: &str) -> bool { runs(cmd, "grok") }
-    fn busy_marks(&self) -> &'static [&'static str] { &["esc to interrupt", "Thinking"] }
-    fn ask_marks(&self) -> &'static [&'static str] { &["Allow", "(y/n)"] }
-    fn sprite(&self, f: usize) -> [&'static str; 3] {
-        // ring with a slash, slash flips
-        [[" ▄▀▀▀▄ ▞", "█  ▞  █ ", "▞▀▄▄▄▀  "], ["▚ ▄▀▀▀▄ ", " █  ▚  █", "  ▀▄▄▄▀▚"]][f % 2]
+    fn busy_marks(&self) -> &'static [&'static str] { &[] }
+    fn ask_marks(&self) -> &'static [&'static str] { &["[y/n]", "(y/n)", "yes, proceed", "are you sure?", "do you trust", "permission requested", "plan approval", "waiting for approval"] }
+    /// Only the bottom of the screen. Old "Writing command" / "Thinking" rows stay in the transcript after the turn.
+    fn read_screen(&self, screen: &str) -> Option<State> {
+        let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+        let tail = lines[lines.len().saturating_sub(8)..].join("\n").to_ascii_lowercase();
+        let working = screen_spins(&tail) || tail.lines().any(grok_live_line);
+        if working {
+            return Some(State::Working);
+        }
+        if self.ask_marks().iter().any(|m| tail.contains(&m.to_ascii_lowercase())) {
+            Some(State::NeedsInput)
+        } else {
+            None
+        }
     }
     // grok takes plain paths, no @-mentions
     fn file_ref(&self, path: &str) -> String {
@@ -107,12 +129,8 @@ impl Agent for Cursor {
     fn color(&self) -> [u8; 3] { [0x9a, 0xa4, 0xb4] }
     // cursor-agent often runs as `node …/cursor-agent/…/index.js`
     fn matches(&self, cmd: &str) -> bool { cmd.contains("cursor-agent") }
-    fn busy_marks(&self) -> &'static [&'static str] { &["ctrl+c to stop", "Generating"] }
-    fn ask_marks(&self) -> &'static [&'static str] { &["Run this command?", "(y)"] }
-    fn sprite(&self, f: usize) -> [&'static str; 3] {
-        // cube, shading swaps faces so it spins
-        [[" ▗▟▀▀▙▖ ", " ▐▓▓░░▌ ", " ▝▜▄▄▛▘ "], [" ▗▟▀▀▙▖ ", " ▐░░▓▓▌ ", " ▝▜▄▄▛▘ "]][f % 2]
-    }
+    fn busy_marks(&self) -> &'static [&'static str] { &["ctrl+c to stop", "generating", "working", "esc to interrupt"] }
+    fn ask_marks(&self) -> &'static [&'static str] { &["Run this command?", "(y)", "allow this", "approve"] }
 }
 
 /// Path + trailing space, single-quoted only when the shell would mangle it.
@@ -194,23 +212,20 @@ mod tests {
     fn other_agents_read_screen() {
         let get = |n| AGENTS.iter().copied().find(|a| a.name() == n).unwrap();
         assert_eq!(get("codex").read_screen("Allow command? esc to interrupt"), Some(State::NeedsInput));
-        assert_eq!(get("codex").read_screen("working (esc to interrupt)"), Some(State::Working));
+        assert_eq!(get("codex").read_screen("Working (12s · esc to interrupt)"), Some(State::Working));
+        assert_eq!(get("codex").read_screen("WORKING"), Some(State::Working));
+        assert_eq!(get("grok").read_screen("⠋ reasoning"), Some(State::Working));
+        assert_eq!(get("cursor").read_screen("esc to interrupt"), Some(State::Working));
         assert_eq!(get("grok").read_screen("Thinking"), Some(State::Working));
+        assert_eq!(get("grok").read_screen("always-approve\nThinking..."), Some(State::Working));
+        assert_eq!(get("grok").read_screen("always-approve"), None);
+        assert_eq!(get("grok").read_screen("Writing command\nls\nThought for 3s\nNot responding"), None);
+        assert_eq!(get("grok").read_screen("Writing command\nResponding"), Some(State::Working));
+        assert_eq!(get("grok").read_screen("Thought for 3s"), None);
         assert_eq!(get("grok").read_screen("run it? (y/n)"), Some(State::NeedsInput));
         assert_eq!(get("cursor").read_screen("Generating"), Some(State::Working));
         assert_eq!(get("cursor").read_screen("Run this command?"), Some(State::NeedsInput));
         assert_eq!(get("cursor").read_screen("$ "), None);
-    }
-
-    #[test]
-    fn sprite_frames_line_up() {
-        // the status line squeezes 3 rows into one cell row, so every row must be the same width
-        for a in AGENTS {
-            let w = a.sprite(0)[0].chars().count();
-            for f in 0..3 {
-                assert!(a.sprite(f).iter().all(|l| l.chars().count() == w), "{} frame {f}", a.name());
-            }
-        }
     }
 
     #[test]

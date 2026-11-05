@@ -63,6 +63,57 @@ pub fn paint(painter: &egui::Painter, rect: Rect, time: f64, bright: bool, opaci
     painter.add(mesh);
 }
 
+fn chip_fill(bright: bool, selected: bool) -> Color32 {
+    if bright {
+        Color32::from_rgba_unmultiplied(255, 255, 255, if selected { 198 } else { 124 })
+    } else if selected {
+        Color32::from_rgba_unmultiplied(232, 238, 255, 96)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 44)
+    }
+}
+
+/// Frosted strip. Alpha falls off toward the bottom so the terminal shows through.
+pub fn bar(painter: &egui::Painter, rect: Rect, bright: bool) {
+    let mut mesh = egui::Mesh::default();
+    const STEPS: u32 = 24;
+    let frost = if bright { 170.0 } else { 64.0 };
+    for y in 0..=STEPS {
+        for x in 0..=STEPS {
+            let v = y as f32 / STEPS as f32;
+            let alpha = (frost * (1.0 - v).powf(1.35)).clamp(0.0, 220.0);
+            let colour = Color32::from_rgba_unmultiplied(236, 240, 255, alpha as u8);
+            mesh.colored_vertex(Pos2::new(rect.left() + x as f32 / STEPS as f32 * rect.width(), rect.top() + v * rect.height()), colour);
+            if x < STEPS && y < STEPS {
+                let i = y * (STEPS + 1) + x;
+                mesh.add_triangle(i, i + 1, i + STEPS + 1);
+                mesh.add_triangle(i + 1, i + STEPS + 2, i + STEPS + 1);
+            }
+        }
+    }
+    painter.add(mesh);
+    painter.rect_filled(
+        Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), rect.top() + 1.0)),
+        0.0,
+        Color32::from_white_alpha(if bright { 190 } else { 100 }),
+    );
+}
+
+/// One tab capsule.
+pub fn chip(painter: &egui::Painter, rect: Rect, bright: bool, selected: bool) {
+    let radius = rect.height() * 0.5;
+    painter.rect_filled(rect.translate(egui::vec2(0.0, 1.0)), radius, Color32::from_black_alpha(if selected { 70 } else { 34 }));
+    painter.rect_filled(rect, radius, chip_fill(bright, selected));
+    let lip = Rect::from_min_max(rect.min + egui::vec2(radius * 0.5, 1.0), Pos2::new(rect.max.x - radius * 0.5, rect.min.y + 2.0));
+    painter.rect_filled(lip, 1.0, Color32::from_white_alpha(if selected { 180 } else { 84 }));
+    let rim = if bright {
+        Color32::from_white_alpha(if selected { 230 } else { 150 })
+    } else {
+        Color32::from_white_alpha(if selected { 128 } else { 58 })
+    };
+    painter.rect_stroke(rect, radius, egui::Stroke::new(1.0, rim), egui::StrokeKind::Inside);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +129,33 @@ mod tests {
             assert!(mesh.vertices.iter().all(|v| v.color.a() == alpha));
             output.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn selected_chip_is_frosted_not_solid() {
+        for bright in [false, true] {
+            let on = chip_fill(bright, true).a();
+            let off = chip_fill(bright, false).a();
+            assert!(on > off, "bright={bright}");
+            assert!(on < 255, "bright={bright}");
+        }
+        assert!(chip_fill(true, true).a() > chip_fill(false, true).a());
+    }
+
+    #[test]
+    fn bar_frost_is_even_and_fades_down() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(200.0, 48.0));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            bar(&ui.painter(), rect, false);
+        });
+        let egui::Shape::Mesh(mesh) = &output.shapes[0].shape else { panic!("expected glass mesh") };
+        let top: Vec<u8> = mesh.vertices.iter().filter(|v| v.pos.y == rect.top()).map(|v| v.color.a()).collect();
+        let bottom_clear = mesh.vertices.iter().filter(|v| v.pos.y == rect.bottom()).all(|v| v.color.a() == 0);
+        output.textures_delta.clear();
+        assert!(top.len() > 2 && top.windows(2).all(|pair| pair[0] == pair[1]), "highlight should not sit in one place");
+        assert!(top[0] > 40);
+        assert!(bottom_clear);
     }
 
     #[test]

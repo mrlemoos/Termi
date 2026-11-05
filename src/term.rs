@@ -68,9 +68,13 @@ impl Tab {
     /// `shell`: a program to run as a login shell; empty = the user's login shell.
     pub fn spawn(id: u64, cwd: PathBuf, shell: &str, ctx: &egui::Context) -> std::io::Result<Tab> {
         let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+        // Cursor launches us with NO_COLOR=1, and the PTY would inherit it. Then ls, Claude, Codex and the rest draw monochrome.
+        unsafe { std::env::remove_var("NO_COLOR") };
         let env = HashMap::from([
+            ("TERM".into(), "xterm-256color".into()),
             ("TERM_PROGRAM".into(), "Termi".into()),
             ("COLORTERM".into(), "truecolor".into()),
+            ("CLICOLOR".into(), "1".into()),
             ("TERMI_TAB".into(), id.to_string()),
             ("TERMI_STATE_DIR".into(), agent::state_dir().to_string_lossy().into_owned()),
         ]);
@@ -184,7 +188,7 @@ impl Tab {
         out
     }
 
-    /// Label for the status line.
+    /// Label shown on the tab.
     pub fn label(&self) -> String {
         if let Some(n) = &self.name {
             return n.clone();
