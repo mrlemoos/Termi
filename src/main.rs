@@ -211,6 +211,12 @@ fn apply(ctx: &egui::Context, s: &settings::Settings) {
 
 /// `name` from `settings::FONTS`; Meslo backs it up for missing files and glyphs (it has the Nerd Font icons).
 fn install_fonts(ctx: &egui::Context, name: &str) {
+    install_fonts_at(ctx, name, true);
+}
+
+/// `system_tab` loads SF for tab titles when that face is on disk. Snapshot tests pass false:
+/// SF rasterisation differs across macOS versions, and the bundled face does not.
+fn install_fonts_at(ctx: &egui::Context, name: &str, system_tab: bool) {
     let mut defs = egui::FontDefinitions::default();
     let font = |b: &'static [u8]| Arc::new(egui::FontData::from_static(b));
     defs.font_data.insert("meslo".into(), font(include_bytes!("../assets/MesloLGSNerdFontMono-Regular.ttf")));
@@ -235,7 +241,7 @@ fn install_fonts(ctx: &egui::Context, name: &str) {
     defs.families.insert(FontFamily::Name("bold".into()), bold);
     // Except tab titles: the system font (SF), at the text optical size.
     let mut tab = vec!["meslo".into()];
-    if let Ok(b) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
+    if system_tab && let Ok(b) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
         let tweak = egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([("wght", TAB_WGHT), ("opsz", 13.0)]), ..Default::default() };
         defs.font_data.insert("sf".into(), Arc::new(egui::FontData::from_owned(b).tweak(tweak)));
         tab.insert(0, "sf".into());
@@ -1032,6 +1038,8 @@ mod tests {
         let mut h = egui_kittest::Harness::builder().with_size(vec2(980.0, 52.0)).build_ui_state(
             move |ui, seen: &mut bool| {
                 apply(ui.ctx(), &settings::Settings::default());
+                // SF differs between this machine and the macOS 15 release runner.
+                install_fonts_at(ui.ctx(), "Meslo", false);
                 if !*seen {
                     *seen = true;
                     return;
