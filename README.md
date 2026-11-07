@@ -43,7 +43,7 @@ Glass mode supports wave or still light. In settings, glass opacity ranges from 
 
 `.md` and `.markdown` files open in preview. Click `preview | source` or press ⌘E to edit raw Markdown. Preview includes unsaved edits; ⌘S saves the source. Switching views preserves edits and review notes. Notes can be added in source only.
 
-Preview renders headings, emphasis, lists, links, fenced code, tables and read-only task lists in terminal fonts. Emphasis is underlined. Images show `[Image: alt text]` or `[Image: no alt text]`; HTML shows `[HTML: not rendered]`. Images aren't fetched and HTML isn't executed.
+Preview renders headings, emphasis, lists, links, fenced code, tables and read-only task lists in terminal fonts. Emphasis is underlined. Fenced code is syntax-highlighted. The fence tag is a language name or file extension; unknown tags stay one color. `docs/snippets.md` has one sample per built-in grammar. The editor uses the same grammars, from the file extension or the file name. Images show `[Image: alt text]` or `[Image: no alt text]`; HTML shows `[HTML: not rendered]`. Images aren't fetched and HTML isn't executed.
 
 Web links open in your browser. Relative Markdown links open in Termi, starting at the top of the file. File navigation, including the tree, blocks while edits are unsaved. Save, then select the destination again; or press Esc twice to discard and close first.
 

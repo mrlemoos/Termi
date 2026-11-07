@@ -133,10 +133,14 @@ impl Editor {
                         }
                     }
                 });
-                let lang = self.path.extension().map_or(String::new(), |e| e.to_string_lossy().into_owned());
+                let token = source_token(&self.path);
+                let resolved = crate::markdown::resolve(&token).map(str::to_owned);
+                let lang = resolved.as_deref().unwrap_or(token.as_str());
                 let theme = egui_extras::syntax_highlighting::CodeTheme::dark(font.size);
                 let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                    let mut job = egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang);
+                    let mut job = egui_extras::syntax_highlighting::highlight_with(
+                        ui.ctx(), ui.style(), &theme, buf.as_str(), lang, crate::markdown::syntect_settings(),
+                    );
                     // egui_extras underlines italic tokens, and there's no italic face anyway
                     job.sections.iter_mut().for_each(|s| (s.format.italics, s.format.underline) = (false, egui::Stroke::NONE));
                     job.wrap.max_width = wrap;
@@ -190,6 +194,14 @@ impl Editor {
         }
         Outcome::Stay
     }
+}
+
+fn source_token(path: &std::path::Path) -> String {
+    path.extension()
+        .filter(|ext| !ext.is_empty())
+        .or_else(|| path.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn markdown_path(path: &std::path::Path) -> bool {
