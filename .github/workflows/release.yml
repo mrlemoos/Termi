@@ -73,8 +73,16 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Checkout is the push that started this run. A release queued behind
+          # another one still has that older SHA, while main already has the
+          # previous cask commit. Replaying our version/sha lines onto it conflicts.
+          # Commit the rendered cask on the current tip instead.
+          cask="$RUNNER_TEMP/termi.rb"
+          cp Casks/termi.rb "$cask"
+          git fetch origin main
+          git checkout -f -B cask-update origin/main
+          cp "$cask" Casks/termi.rb
           git add Casks/termi.rb
           git diff --cached --quiet && exit 0
           git commit -m "build: publish termi v$RELEASE_VERSION"
-          git pull --rebase origin main
           git push origin HEAD:main
