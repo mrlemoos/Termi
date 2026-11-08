@@ -12,4 +12,6 @@ Small repo: describe purpose, boundaries and validation here. Split only when in
 
 ## Active changes
 
-Link relevant [specs](docs/specs/README.md). Completed changes retain durable rationale through ADRs. No automatic deletion.
+- [Stacked tab columns](docs/specs/stacked-tab-columns.md)
+
+Completed changes retain durable rationale through ADRs. No automatic deletion.

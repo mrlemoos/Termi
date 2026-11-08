@@ -301,7 +301,11 @@ impl App {
             self.new_tab(ctx, cwd, split);
         }
         if cmd(Key::W) {
+            let next = focus_after_close(self.tabs.len(), self.active);
             self.tabs.remove(self.active);
+            if let Some(next) = next {
+                self.active = next;
+            }
         }
         if cmd(Key::Comma) {
             self.settings_open = if self.settings_open.is_some() {
@@ -346,6 +350,82 @@ fn tab_slot(active: usize, len: usize, split: bool) -> usize {
     } else {
         len
     }
+}
+
+/// Column per screen, top to bottom in tab-list order. A pane in no screen is its own trailing column.
+fn tab_columns(order: &[u64], screens: &[Layout]) -> Vec<Vec<usize>> {
+    let mut used = vec![false; order.len()];
+    let mut cols = Vec::new();
+    for screen in screens {
+        let mut col = Vec::new();
+        for (i, id) in order.iter().enumerate() {
+            if !used[i] && screen.contains(*id) {
+                used[i] = true;
+                col.push(i);
+            }
+        }
+        if !col.is_empty() {
+            cols.push(col);
+        }
+    }
+    for (i, seen) in used.iter().enumerate() {
+        if !seen {
+            cols.push(vec![i]);
+        }
+    }
+    cols
+}
+
+/// One row is `chip_h + 8`. Each extra row adds `chip_h + 6`.
+fn stacked_bar_height(rows: usize, chip_h: f32) -> f32 {
+    let rows = rows.max(1) as f32;
+    rows * chip_h + (rows - 1.0) * 6.0 + 8.0
+}
+
+struct ChipSpot {
+    index: usize,
+    x: f32,
+    y: f32,
+    w: f32,
+}
+
+/// Left-aligned chips. Column pitch is the widest chip. Offsets are from the bar's top-left.
+fn place_columns(columns: &[Vec<usize>], widths: &[f32], chip_h: f32) -> Vec<ChipSpot> {
+    let mut spots = Vec::new();
+    let mut x = tab_inset(false);
+    for col in columns {
+        let pitch = col
+            .iter()
+            .filter_map(|i| widths.get(*i).copied())
+            .fold(0.0, f32::max);
+        for (row, &index) in col.iter().enumerate() {
+            let w = widths.get(index).copied().unwrap_or(0.0);
+            let y = 4.0 + row as f32 * (chip_h + 6.0);
+            spots.push(ChipSpot { index, x, y, w });
+        }
+        if !col.is_empty() {
+            x += pitch + 6.0;
+        }
+    }
+    spots
+}
+
+/// Traffic lights use the one-row band, including when the bar is taller.
+fn light_hover(y: f32, chip_h: f32) -> bool {
+    y < stacked_bar_height(1, chip_h)
+}
+
+/// Directory label on the first row, 16px in from the right, centred in the chip height.
+fn cwd_origin(bar: egui::Rect, text: egui::Vec2, chip_h: f32) -> Pos2 {
+    Pos2::new(
+        bar.right() - 16.0 - text.x,
+        bar.top() + 4.0 + (chip_h - text.y) * 0.5,
+    )
+}
+
+/// Focus stays on the closed slot. The last pane leaves nothing to focus.
+fn focus_after_close(len: usize, active: usize) -> Option<usize> {
+    (len > 1).then(|| active.min(len - 2))
 }
 
 /// One key into the rename draft: Some(true) commit, Some(false) cancel.
@@ -628,9 +708,14 @@ impl eframe::App for App {
         let font = self.fonts().regular;
         let tab_font = FontId::new(tab_title_size(font.size), FontFamily::Name("tab".into()));
         let metrics = tab_metrics(&ctx, &tab_font);
+        let order: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+        let columns = tab_columns(&order, &self.screens);
+        let rows = columns.iter().map(|c| c.len()).max().unwrap_or(1);
+        let bar_h = stacked_bar_height(rows, metrics.chip_h);
+        // The light band stays one row when a column stacks below it.
         let show = ctx
             .input(|i| i.pointer.hover_pos())
-            .is_some_and(|p| p.y < metrics.bar_h);
+            .is_some_and(|p| light_hover(p.y, metrics.chip_h));
         if self.lights != Some(show) {
             set_traffic_lights(show);
             self.lights = Some(show);
@@ -662,7 +747,7 @@ impl eframe::App for App {
             .collect();
         let bright = term::theme().light;
         let hit = egui::Panel::top("tabs")
-            .exact_size(metrics.bar_h)
+            .exact_size(bar_h)
             .show_separator_line(false)
             .frame(
                 egui::Frame::NONE
@@ -675,7 +760,9 @@ impl eframe::App for App {
                     }),
             )
             .show(ui, |ui| {
-                tab_strip(ui, &chips, &metrics, &tab_font, bright, show, &cwd, &font)
+                tab_strip(
+                    ui, &chips, &columns, &metrics, &tab_font, bright, show, &cwd, &font,
+                )
             })
             .inner;
         match hit {
@@ -1133,7 +1220,6 @@ fn mark_kind(name: &str) -> Option<&'static str> {
 
 struct TabMetrics {
     chip_h: f32,
-    bar_h: f32,
 }
 
 struct Chip {
@@ -1151,10 +1237,8 @@ enum TabHit {
 
 fn tab_metrics(ctx: &egui::Context, title: &FontId) -> TabMetrics {
     let text_h = ctx.fonts_mut(|f| f.row_height(title));
-    let chip_h = chip_height(text_h);
     TabMetrics {
-        chip_h,
-        bar_h: chip_h + 8.0,
+        chip_h: chip_height(text_h),
     }
 }
 
@@ -1173,14 +1257,23 @@ fn tab_inset(_lights: bool) -> f32 {
     80.0
 }
 
-/// Liquid-glass tab row. Dragging empty glass moves the window. Returns the tab that was clicked.
+struct DrawnChip {
+    colour: Color32,
+    galley: Arc<egui::Galley>,
+    mascot_w: f32,
+    mascot_h: f32,
+    w: f32,
+}
+
+/// Liquid-glass tab columns. Dragging empty glass moves the window. Returns the tab that was clicked.
 fn tab_strip(
     ui: &mut egui::Ui,
     chips: &[Chip],
+    columns: &[Vec<usize>],
     metrics: &TabMetrics,
     label_font: &FontId,
     bright: bool,
-    lights: bool,
+    _lights: bool,
     cwd: &str,
     cwd_font: &FontId,
 ) -> Option<TabHit> {
@@ -1190,13 +1283,9 @@ fn tab_strip(
     if drag.drag_started() {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
-    let gap = ((bar.height() - metrics.chip_h) * 0.5).max(0.0);
-    ui.add_space(gap);
-    let mut hit = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.add_space(tab_inset(lights));
-        for (i, chip) in chips.iter().enumerate() {
+    let drawn: Vec<DrawnChip> = chips
+        .iter()
+        .map(|chip| {
             let colour = chip_colour(chip.active, chip.state, chip.agent.is_some(), chip.done);
             let galley =
                 ui.painter()
@@ -1217,44 +1306,64 @@ fn tab_strip(
             } else {
                 10.0
             };
-            let (rect, resp) = ui.allocate_exact_size(
-                vec2(lead + galley.size().x + 12.0, metrics.chip_h),
-                Sense::click(),
-            );
-            glass::chip(ui.painter(), rect, bright, chip.active);
-            let mut x = rect.left() + if chip.agent.is_some() { 5.0 } else { 10.0 };
-            if let Some(a) = chip.agent {
-                paint_mascot(
-                    ui.painter(),
-                    Pos2::new(x, rect.center().y - mascot_h * 0.5),
-                    mascot_w,
-                    mascot_h,
-                    a,
-                    chip.state,
-                    chip.done,
-                );
-                x += mascot_w + 4.0;
-            }
-            ui.painter().galley(
-                Pos2::new(x, rect.center().y - galley.size().y * 0.5),
-                galley,
+            DrawnChip {
                 colour,
-            );
-            if resp.double_clicked() {
-                hit = Some(TabHit::Rename(i));
-            } else if resp.clicked() {
-                hit = Some(TabHit::Select(i));
+                w: lead + galley.size().x + 12.0,
+                galley,
+                mascot_w,
+                mascot_h,
             }
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new(cwd)
-                    .font(cwd_font.clone())
-                    .color(Color32::from_gray(120)),
+        })
+        .collect();
+    let widths: Vec<f32> = drawn.iter().map(|d| d.w).collect();
+    let fallback: Vec<Vec<usize>> = (0..chips.len()).map(|i| vec![i]).collect();
+    let columns = if columns.is_empty() {
+        &fallback
+    } else {
+        columns
+    };
+    let mut hit = None;
+    for spot in place_columns(columns, &widths, metrics.chip_h) {
+        let (Some(chip), Some(drawn)) = (chips.get(spot.index), drawn.get(spot.index)) else {
+            continue;
+        };
+        let rect =
+            egui::Rect::from_min_size(bar.min + vec2(spot.x, spot.y), vec2(spot.w, metrics.chip_h));
+        let resp = ui.allocate_rect(rect, Sense::click());
+        glass::chip(ui.painter(), rect, bright, chip.active);
+        let mut x = rect.left() + if chip.agent.is_some() { 5.0 } else { 10.0 };
+        if let Some(a) = chip.agent {
+            paint_mascot(
+                ui.painter(),
+                Pos2::new(x, rect.center().y - drawn.mascot_h * 0.5),
+                drawn.mascot_w,
+                drawn.mascot_h,
+                a,
+                chip.state,
+                chip.done,
             );
-        });
-    });
+            x += drawn.mascot_w + 4.0;
+        }
+        ui.painter().galley(
+            Pos2::new(x, rect.center().y - drawn.galley.size().y * 0.5),
+            drawn.galley.clone(),
+            drawn.colour,
+        );
+        if resp.double_clicked() {
+            hit = Some(TabHit::Rename(spot.index));
+        } else if resp.clicked() {
+            hit = Some(TabHit::Select(spot.index));
+        }
+    }
+    let cwd_colour = Color32::from_gray(120);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(cwd.to_owned(), cwd_font.clone(), cwd_colour);
+    ui.painter().galley(
+        cwd_origin(bar, galley.size(), metrics.chip_h),
+        galley,
+        cwd_colour,
+    );
     hit
 }
 
@@ -1471,6 +1580,91 @@ mod tests {
     }
 
     #[test]
+    fn split_stacks_under_the_source_and_keeps_the_next_screen() {
+        let mut ids = vec![1, 3];
+        ids.insert(tab_slot(0, ids.len(), true), 2);
+        assert_eq!(ids, vec![1, 2, 3]);
+        let screens = [Layout::Leaf(1).split(1, 2, true, false), Layout::Leaf(3)];
+        assert_eq!(tab_columns(&ids, &screens), vec![vec![0, 1], vec![2]]);
+
+        ids.insert(tab_slot(0, ids.len(), true), 4);
+        assert_eq!(ids, vec![1, 4, 2, 3]);
+        let screens = [
+            Layout::Leaf(1)
+                .split(1, 2, true, false)
+                .split(1, 4, false, false),
+            Layout::Leaf(3),
+        ];
+        assert_eq!(tab_columns(&ids, &screens), vec![vec![0, 1, 2], vec![3]]);
+
+        ids.insert(tab_slot(2, ids.len(), true), 5);
+        assert_eq!(ids, vec![1, 4, 2, 5, 3]);
+        let screens = [
+            Layout::Leaf(1)
+                .split(1, 2, true, false)
+                .split(1, 4, false, false)
+                .split(2, 5, true, false),
+            Layout::Leaf(3),
+        ];
+        assert_eq!(tab_columns(&ids, &screens), vec![vec![0, 1, 2, 3], vec![4]]);
+    }
+
+    #[test]
+    fn drag_keeps_tab_list_order_when_the_tree_changes() {
+        let ids = [1, 2, 3];
+        let layout = Layout::Leaf(1)
+            .split(1, 2, true, false)
+            .split(2, 3, false, false);
+        let moved = layout.clone().moved(3, 1, true, true);
+        let area = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
+        let tree: Vec<u64> = moved
+            .rects(area, (1.0, 1.0))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_ne!(tree, ids);
+        assert_eq!(tab_columns(&ids, &[moved]), vec![vec![0, 1, 2]]);
+        assert_eq!(tab_columns(&[9], &[]), vec![vec![0]]);
+    }
+
+    #[test]
+    fn stacked_bar_grows_by_a_chip_and_a_gap() {
+        assert_eq!(stacked_bar_height(1, 20.0), 28.0);
+        assert_eq!(stacked_bar_height(3, 20.0), 80.0);
+        assert!(light_hover(27.0, 20.0));
+        assert!(!light_hover(28.0, 20.0));
+        assert!(!light_hover(40.0, 20.0));
+    }
+
+    #[test]
+    fn column_pitch_uses_the_widest_chip_and_chips_stay_narrow() {
+        let spots = place_columns(&[vec![0, 1], vec![2]], &[10.0, 30.0, 12.0], 20.0);
+        let spot = |i: usize| spots.iter().find(|s| s.index == i).unwrap();
+        assert_eq!(spot(0).x, 80.0);
+        assert_eq!(spot(0).y, 4.0);
+        assert_eq!(spot(0).w, 10.0);
+        assert_eq!(spot(1).x, 80.0);
+        assert_eq!(spot(1).y, 30.0);
+        assert_eq!(spot(1).w, 30.0);
+        assert_eq!(spot(2).x, 116.0);
+        assert_eq!(spot(2).y, 4.0);
+        assert_eq!(spot(2).w, 12.0);
+        let bar = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 80.0));
+        assert_eq!(
+            cwd_origin(bar, vec2(40.0, 10.0), 20.0),
+            egui::pos2(144.0, 9.0)
+        );
+    }
+
+    #[test]
+    fn close_keeps_the_slot_and_the_last_pane_clears_focus() {
+        assert_eq!(focus_after_close(1, 0), None);
+        assert_eq!(focus_after_close(4, 0), Some(0));
+        assert_eq!(focus_after_close(4, 2), Some(2));
+        assert_eq!(focus_after_close(4, 3), Some(2));
+    }
+
+    #[test]
     fn tabs_do_not_shift_for_traffic_lights() {
         assert_eq!(tab_inset(false), tab_inset(true));
     }
@@ -1645,18 +1839,72 @@ mod tests {
                     let mono = FontId::monospace(14.0);
                     let label = FontId::new(tab_title_size(14.0), FontFamily::Name("tab".into()));
                     let metrics = tab_metrics(ui.ctx(), &label);
+                    let columns: Vec<Vec<usize>> = (0..chips.len()).map(|i| vec![i]).collect();
                     egui::Panel::top("tabs")
-                        .exact_size(metrics.bar_h)
+                        .exact_size(stacked_bar_height(1, metrics.chip_h))
                         .show_separator_line(false)
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
-                            tab_strip(ui, &chips, &metrics, &label, false, false, "~/src", &mono);
+                            tab_strip(
+                                ui, &chips, &columns, &metrics, &label, false, false, "~/src",
+                                &mono,
+                            );
                         });
                 },
                 false,
             );
         h.run();
         h.snapshot("tab_bar");
+        term::set_theme("xterm");
+    }
+
+    #[test]
+    fn stacked_columns_put_the_split_under_its_screen() {
+        let _theme = term::THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        term::set_theme("xterm");
+        let chip = |label: &str, active: bool| Chip {
+            label: label.into(),
+            active,
+            agent: None,
+            state: State::Idle,
+            done: false,
+        };
+        let chips = vec![
+            chip("⌘1 a", true),
+            chip("⌘2 bb", false),
+            chip("⌘3 c", false),
+        ];
+        let columns = vec![vec![0, 1], vec![2]];
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(420.0, 90.0))
+            .build_ui_state(
+                move |ui, seen: &mut bool| {
+                    apply(ui.ctx(), &settings::Settings::default());
+                    install_fonts_at(ui.ctx(), "Meslo", false);
+                    if !*seen {
+                        *seen = true;
+                        return;
+                    }
+                    ui.painter().rect_filled(ui.max_rect(), 0.0, background());
+                    let mono = FontId::monospace(14.0);
+                    let label = FontId::new(tab_title_size(14.0), FontFamily::Name("tab".into()));
+                    let metrics = tab_metrics(ui.ctx(), &label);
+                    let rows = columns.iter().map(|c| c.len()).max().unwrap_or(1);
+                    egui::Panel::top("tabs")
+                        .exact_size(stacked_bar_height(rows, metrics.chip_h))
+                        .show_separator_line(false)
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            tab_strip(
+                                ui, &chips, &columns, &metrics, &label, false, false, "~/work",
+                                &mono,
+                            );
+                        });
+                },
+                false,
+            );
+        h.run();
+        h.snapshot("tab_columns");
         term::set_theme("xterm");
     }
 
