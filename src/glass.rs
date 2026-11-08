@@ -92,11 +92,6 @@ pub fn bar(painter: &egui::Painter, rect: Rect, bright: bool) {
         }
     }
     painter.add(mesh);
-    painter.rect_filled(
-        Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), rect.top() + 1.0)),
-        0.0,
-        Color32::from_white_alpha(if bright { 190 } else { 100 }),
-    );
 }
 
 /// One tab capsule.
