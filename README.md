@@ -31,6 +31,8 @@ Agent notifications use Termi's name and icon. macOS asks for permission when Te
 
 Glass mode supports wave or still light. In settings, glass opacity ranges from 0.0 clear to 1.0 solid; ←→ adjusts by 0.01. The default is 0.86.
 
+The first launch asks whether Termi opens on a clean slate or picks up the last close. ⌘, changes that later, on the row `when termi opens`. Pick up reopens each tab in its directory, with the same splits, and continues a claude, codex, grok, or cursor session that was in front. The layout is `~/.config/termi/session`.
+
 ### Editor
 
 | Key | Action |

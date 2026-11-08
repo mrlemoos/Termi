@@ -7,6 +7,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -52,6 +53,9 @@ pub struct Tab {
     pub name: Option<String>,
     pub cwd: PathBuf,
     pub agent: Option<&'static dyn Agent>,
+    /// Restored agent, kept until the foreground is that agent, something else, or the hold expires.
+    pub held_agent: Option<String>,
+    pub held_since: Option<Instant>,
     pub state: State,
     /// Finished working while you weren't looking; cleared when the tab is viewed.
     pub done: bool,
@@ -67,7 +71,12 @@ pub struct Cell {
 impl Tab {
     /// `shell`: a program to run as a login shell; empty = the user's login shell.
     pub fn spawn(id: u64, cwd: PathBuf, shell: &str, ctx: &egui::Context) -> std::io::Result<Tab> {
-        let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+        let size = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 8,
+            cell_height: 16,
+        };
         // Cursor launches us with NO_COLOR=1, and the PTY would inherit it. Then ls, Claude, Codex and the rest draw monochrome.
         unsafe { std::env::remove_var("NO_COLOR") };
         let env = HashMap::from([
@@ -76,23 +85,55 @@ impl Tab {
             ("COLORTERM".into(), "truecolor".into()),
             ("CLICOLOR".into(), "1".into()),
             ("TERMI_TAB".into(), id.to_string()),
-            ("TERMI_STATE_DIR".into(), agent::state_dir().to_string_lossy().into_owned()),
+            (
+                "TERMI_STATE_DIR".into(),
+                agent::state_dir().to_string_lossy().into_owned(),
+            ),
         ]);
-        let opts = tty::Options { shell: (!shell.is_empty()).then(|| tty::Shell::new(shell.into(), vec!["-l".into()])), working_directory: Some(cwd.clone()), drain_on_exit: false, env };
+        let opts = tty::Options {
+            shell: (!shell.is_empty()).then(|| tty::Shell::new(shell.into(), vec!["-l".into()])),
+            working_directory: Some(cwd.clone()),
+            drain_on_exit: false,
+            env,
+        };
         let pty = tty::new(&opts, size, id)?;
         let (pid, fd) = (pty.child().id(), pty.file().as_raw_fd());
 
         let (tx, events) = channel();
-        let listener = Listener { tx, ctx: ctx.clone() };
+        let listener = Listener {
+            tx,
+            ctx: ctx.clone(),
+        };
         let dims = TermSize::new(size.num_cols as usize, size.num_lines as usize);
-        let term = Arc::new(FairMutex::new(Term::new(Config::default(), &dims, listener.clone())));
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &dims,
+            listener.clone(),
+        )));
         let ev_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let loop_tx = ev_loop.channel();
         ev_loop.spawn();
 
         Ok(Tab {
-            id, term, loop_tx, events, pid, fd, size, cwd,
-            title: String::new(), title_pgid: 0, fg: 0, cmd: String::new(), name: None, agent: None, state: State::Idle, done: false, exited: false,
+            id,
+            term,
+            loop_tx,
+            events,
+            pid,
+            fd,
+            size,
+            cwd,
+            title: String::new(),
+            title_pgid: 0,
+            fg: 0,
+            cmd: String::new(),
+            name: None,
+            agent: None,
+            held_agent: None,
+            held_since: None,
+            state: State::Idle,
+            done: false,
+            exited: false,
         })
     }
 
@@ -110,7 +151,11 @@ impl Tab {
     pub fn paste(&self, text: &str) {
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        self.write(if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text });
+        self.write(if bracketed {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text
+        });
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
@@ -118,8 +163,15 @@ impl Tab {
         if (cols, lines) == (self.size.num_cols, self.size.num_lines) || cols == 0 || lines == 0 {
             return;
         }
-        self.size = WindowSize { num_cols: cols, num_lines: lines, cell_width: cell.w as u16, cell_height: cell.h as u16 };
-        self.term.lock().resize(TermSize::new(cols as usize, lines as usize));
+        self.size = WindowSize {
+            num_cols: cols,
+            num_lines: lines,
+            cell_width: cell.w as u16,
+            cell_height: cell.h as u16,
+        };
+        self.term
+            .lock()
+            .resize(TermSize::new(cols as usize, lines as usize));
         let _ = self.loop_tx.send(Msg::Resize(self.size));
     }
 
@@ -148,7 +200,11 @@ impl Tab {
     /// Foreground process, cwd, agent + its state. Called ~1/s.
     pub fn poll(&mut self) {
         self.fg = unsafe { libc::tcgetpgrp(self.fd) };
-        let fg = if self.fg > 0 { self.fg as u32 } else { self.pid };
+        let fg = if self.fg > 0 {
+            self.fg as u32
+        } else {
+            self.pid
+        };
         // ponytail: one `ps` per tab per poll; sysctl(KERN_PROCARGS2) if this ever shows up in a profile.
         self.cmd = std::process::Command::new("ps")
             .args(["-o", "command=", "-p", &fg.to_string()])
@@ -159,6 +215,14 @@ impl Tab {
             self.cwd = cwd;
         }
         self.agent = agent::detect(&self.cmd);
+        if self.agent.is_some()
+            || self
+                .held_since
+                .is_some_and(|t| t.elapsed() > Duration::from_secs(15))
+        {
+            self.held_agent = None;
+            self.held_since = None;
+        }
         let prev = self.state;
         self.state = match self.agent {
             Some(a) => agent::resolve(a, &self.screen_text(), self.id),
@@ -194,8 +258,19 @@ impl Tab {
             return n.clone();
         }
         match self.agent {
-            Some(a) => session_name(&self.title, a.name()).filter(|_| self.title_pgid == self.fg).unwrap_or_else(|| a.name().to_owned()),
-            None => self.cmd.split_whitespace().next().unwrap_or("zsh").rsplit('/').next().unwrap_or("").trim_start_matches('-').to_owned(),
+            Some(a) => session_name(&self.title, a.name())
+                .filter(|_| self.title_pgid == self.fg)
+                .unwrap_or_else(|| a.name().to_owned()),
+            None => self
+                .cmd
+                .split_whitespace()
+                .next()
+                .unwrap_or("zsh")
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('-')
+                .to_owned(),
         }
     }
 
@@ -235,9 +310,17 @@ impl Drop for Tab {
 /// the raw material for tuning `busy_marks`/`ask_marks`.
 fn debug_log(tab: u64, agent: &str, state: State, screen: &str) {
     use std::io::Write;
-    let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let lines: Vec<&str> = screen
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     let tail = lines[lines.len().saturating_sub(15)..].join("\n");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(agent::state_dir().join("debug.log")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(agent::state_dir().join("debug.log"))
+    {
         let _ = writeln!(f, "== tab {tab} {agent} {state:?}\n{tail}");
     }
 }
@@ -246,7 +329,9 @@ fn debug_log(tab: u64, agent: &str, state: State, screen: &str) {
 /// ignore the agent's default title ("Claude Code"), cap the length.
 // ponytail: "title mentions the agent = default title" heuristic.
 fn session_name(title: &str, agent: &str) -> Option<String> {
-    let name = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    let name = title
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim();
     if name.is_empty() || name.to_lowercase().contains(agent) {
         return None;
     }
@@ -260,15 +345,28 @@ fn to_point<T>(t: &Term<T>, p: Pos2, origin: Pos2, cell: &Cell) -> (Point, Side)
     let x = ((p.x - origin.x) / cell.w).max(0.0);
     let col = (x as usize).min(t.columns() - 1);
     let row = (((p.y - origin.y) / cell.h).max(0.0) as i32).min(t.screen_lines() as i32 - 1);
-    let side = if x.fract() < 0.5 { Side::Left } else { Side::Right };
-    (Point::new(Line(row - t.grid().display_offset() as i32), Column(col)), side)
+    let side = if x.fract() < 0.5 {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    (
+        Point::new(Line(row - t.grid().display_offset() as i32), Column(col)),
+        side,
+    )
 }
 
 fn proc_cwd(pid: u32) -> Option<PathBuf> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
     let n = unsafe {
-        libc::proc_pidinfo(pid as i32, libc::PROC_PIDVNODEPATHINFO, 0, &mut info as *mut _ as *mut _, size)
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut _,
+            size,
+        )
     };
     if n != size {
         return None;
@@ -288,21 +386,45 @@ pub struct Theme {
 }
 
 const SOLARIZED: [u32; 16] = [
-    0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
-    0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+    0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x002b36,
+    0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
 ];
 
 pub const THEMES: [Theme; 4] = [
-    Theme { name: "xterm", bg: 0x000000, fg: 0xe5e5e5, ansi: [
-        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
-        0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-    ], light: false },
-    Theme { name: "solarized dark", bg: 0x002b36, fg: 0x839496, ansi: SOLARIZED, light: false },
-    Theme { name: "solarized light", bg: 0xfdf6e3, fg: 0x657b83, ansi: SOLARIZED, light: true },
-    Theme { name: "gruvbox", bg: 0x282828, fg: 0xebdbb2, ansi: [
-        0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
-        0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
-    ], light: false },
+    Theme {
+        name: "xterm",
+        bg: 0x000000,
+        fg: 0xe5e5e5,
+        ansi: [
+            0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+            0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+        ],
+        light: false,
+    },
+    Theme {
+        name: "solarized dark",
+        bg: 0x002b36,
+        fg: 0x839496,
+        ansi: SOLARIZED,
+        light: false,
+    },
+    Theme {
+        name: "solarized light",
+        bg: 0xfdf6e3,
+        fg: 0x657b83,
+        ansi: SOLARIZED,
+        light: true,
+    },
+    Theme {
+        name: "gruvbox",
+        bg: 0x282828,
+        fg: 0xebdbb2,
+        ansi: [
+            0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
+            0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
+        ],
+        light: false,
+    },
 ];
 
 // ponytail: one global theme read by every painter; thread it through if windows ever get their own.
@@ -310,7 +432,10 @@ static THEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::n
 
 /// Unknown names fall back to xterm.
 pub fn set_theme(name: &str) {
-    THEME.store(THEMES.iter().position(|t| t.name == name).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    THEME.store(
+        THEMES.iter().position(|t| t.name == name).unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Tests that touch the global theme take this so they don't see each other's.
@@ -334,7 +459,11 @@ pub fn hex(c: u32) -> Color32 {
 }
 
 fn to_rgb(c: Color32) -> Rgb {
-    Rgb { r: c.r(), g: c.g(), b: c.b() }
+    Rgb {
+        r: c.r(),
+        g: c.g(),
+        b: c.b(),
+    }
 }
 
 fn dim(c: Color32) -> Color32 {
@@ -368,7 +497,9 @@ fn resolve(c: Color, colors: &alacritty_terminal::term::color::Colors, bold: boo
     };
     // bold-is-bright, like every default terminal
     let i = if bold && i < 8 { i + 8 } else { i };
-    colors[i].map(|c| Color32::from_rgb(c.r, c.g, c.b)).unwrap_or_else(|| index_color(i))
+    colors[i]
+        .map(|c| Color32::from_rgb(c.r, c.g, c.b))
+        .unwrap_or_else(|| index_color(i))
 }
 
 // ---------- render ----------
@@ -378,7 +509,14 @@ pub struct Fonts {
     pub bold: FontId,
 }
 
-pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fonts, focused: bool) {
+pub fn paint(
+    tab: &Tab,
+    painter: &Painter,
+    origin: Pos2,
+    cell: &Cell,
+    fonts: &Fonts,
+    focused: bool,
+) {
     let term = tab.term.lock();
     let content = term.renderable_content();
     let off = content.display_offset as i32;
@@ -389,7 +527,17 @@ pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fo
     let mut run: Option<(i32, usize, Color32, bool, String)> = None;
     let flush = |run: &mut Option<(i32, usize, Color32, bool, String)>| {
         if let Some((row, col, fg, bold, text)) = run.take() {
-            painter.text(at(row, col), egui::Align2::LEFT_TOP, text, if bold { fonts.bold.clone() } else { fonts.regular.clone() }, fg);
+            painter.text(
+                at(row, col),
+                egui::Align2::LEFT_TOP,
+                text,
+                if bold {
+                    fonts.bold.clone()
+                } else {
+                    fonts.regular.clone()
+                },
+                fg,
+            );
         }
     };
 
@@ -411,15 +559,31 @@ pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fo
         if flags.contains(Flags::INVERSE) ^ selected ^ is_cursor {
             std::mem::swap(&mut fg, &mut bg);
         }
-        let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
+        let width = if flags.contains(Flags::WIDE_CHAR) {
+            2.0
+        } else {
+            1.0
+        };
         if bg != background() {
-            painter.rect_filled(Rect::from_min_size(at(row, col), vec2(cell.w * width, cell.h)), 0.0, bg);
+            painter.rect_filled(
+                Rect::from_min_size(at(row, col), vec2(cell.w * width, cell.h)),
+                0.0,
+                bg,
+            );
         }
         if flags.contains(Flags::UNDERLINE) {
             let y = at(row, col).y + cell.h - 1.0;
-            painter.hline(at(row, col).x..=at(row, col).x + cell.w, y, Stroke::new(1.0, fg));
+            painter.hline(
+                at(row, col).x..=at(row, col).x + cell.w,
+                y,
+                Stroke::new(1.0, fg),
+            );
         }
-        let ch = if flags.contains(Flags::HIDDEN) { ' ' } else { c.cell.c };
+        let ch = if flags.contains(Flags::HIDDEN) {
+            ' '
+        } else {
+            c.cell.c
+        };
         let continues = run.as_ref().is_some_and(|(r, start, f, b, t)| {
             *r == row && start + t.len() == col && *f == fg && *b == bold
         });
@@ -427,9 +591,21 @@ pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fo
             flush(&mut run);
         }
         if ch.is_ascii() {
-            run.get_or_insert_with(|| (row, col, fg, bold, String::new())).4.push(ch);
+            run.get_or_insert_with(|| (row, col, fg, bold, String::new()))
+                .4
+                .push(ch);
         } else {
-            painter.text(at(row, col), egui::Align2::LEFT_TOP, ch, if bold { fonts.bold.clone() } else { fonts.regular.clone() }, fg);
+            painter.text(
+                at(row, col),
+                egui::Align2::LEFT_TOP,
+                ch,
+                if bold {
+                    fonts.bold.clone()
+                } else {
+                    fonts.regular.clone()
+                },
+                fg,
+            );
         }
     }
     flush(&mut run);
@@ -437,10 +613,32 @@ pub fn paint(tab: &Tab, painter: &Painter, origin: Pos2, cell: &Cell, fonts: &Fo
     let p = at(cursor.point.line.0 + off, cursor.point.column.0);
     let r = Rect::from_min_size(p, vec2(cell.w, cell.h));
     match cursor.shape {
-        CursorShape::Block if !focused => { painter.rect_stroke(r, 0.0, Stroke::new(1.0, foreground()), egui::StrokeKind::Inside); }
-        CursorShape::HollowBlock => { painter.rect_stroke(r, 0.0, Stroke::new(1.0, foreground()), egui::StrokeKind::Inside); }
-        CursorShape::Beam => { painter.rect_filled(Rect::from_min_size(p, vec2(2.0, cell.h)), 0.0, foreground()); }
-        CursorShape::Underline => { painter.rect_filled(Rect::from_min_size(p + vec2(0.0, cell.h - 2.0), vec2(cell.w, 2.0)), 0.0, foreground()); }
+        CursorShape::Block if !focused => {
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, foreground()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        CursorShape::HollowBlock => {
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, foreground()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        CursorShape::Beam => {
+            painter.rect_filled(Rect::from_min_size(p, vec2(2.0, cell.h)), 0.0, foreground());
+        }
+        CursorShape::Underline => {
+            painter.rect_filled(
+                Rect::from_min_size(p + vec2(0.0, cell.h - 2.0), vec2(cell.w, 2.0)),
+                0.0,
+                foreground(),
+            );
+        }
         _ => {}
     }
 }
@@ -487,7 +685,10 @@ pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Cow<'static
 }
 
 pub fn grid_size(area: Vec2, cell: &Cell) -> (u16, u16) {
-    ((area.x / cell.w).floor() as u16, (area.y / cell.h).floor() as u16)
+    (
+        (area.x / cell.w).floor() as u16,
+        (area.y / cell.h).floor() as u16,
+    )
 }
 
 #[cfg(test)]
@@ -498,19 +699,37 @@ mod tests {
     fn keys_and_colors() {
         let _theme = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let none = Modifiers::NONE;
-        assert_eq!(key_bytes(Key::C, Modifiers::CTRL, false).unwrap().as_ref(), b"\x03");
-        assert_eq!(key_bytes(Key::ArrowUp, none, true).unwrap().as_ref(), b"\x1bOA");
-        assert_eq!(key_bytes(Key::ArrowUp, none, false).unwrap().as_ref(), b"\x1b[A");
+        assert_eq!(
+            key_bytes(Key::C, Modifiers::CTRL, false).unwrap().as_ref(),
+            b"\x03"
+        );
+        assert_eq!(
+            key_bytes(Key::ArrowUp, none, true).unwrap().as_ref(),
+            b"\x1bOA"
+        );
+        assert_eq!(
+            key_bytes(Key::ArrowUp, none, false).unwrap().as_ref(),
+            b"\x1b[A"
+        );
         assert!(key_bytes(Key::T, Modifiers::COMMAND, false).is_none());
         assert!(key_bytes(Key::A, none, false).is_none());
-        assert_eq!(session_name("✳ Fix login bug", "claude").as_deref(), Some("Fix login bug"));
+        assert_eq!(
+            session_name("✳ Fix login bug", "claude").as_deref(),
+            Some("Fix login bug")
+        );
         assert_eq!(session_name("⠂ Claude Code", "claude"), None);
         assert_eq!(session_name("", "codex"), None);
-        assert_eq!(session_name("a very long session name that goes on", "grok").as_deref(), Some("a very long session name…"));
+        assert_eq!(
+            session_name("a very long session name that goes on", "grok").as_deref(),
+            Some("a very long session name…")
+        );
         assert_eq!(dim(Color32::WHITE), Color32::from_gray(170));
         assert_eq!(index_color(16), Color32::BLACK);
         assert_eq!(index_color(231), Color32::WHITE);
-        assert_eq!(index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize), background());
+        assert_eq!(
+            index_color(alacritty_terminal::vte::ansi::NamedColor::Background as usize),
+            background()
+        );
     }
 
     #[test]
@@ -533,10 +752,16 @@ mod tests {
 
     #[test]
     fn grid_and_names() {
-        assert_eq!(grid_size(vec2(100.0, 50.0), &Cell { w: 8.0, h: 16.0 }), (12, 3));
+        assert_eq!(
+            grid_size(vec2(100.0, 50.0), &Cell { w: 8.0, h: 16.0 }),
+            (12, 3)
+        );
         assert_eq!(hex(0x123456), Color32::from_rgb(0x12, 0x34, 0x56));
         // cut on char boundaries, not bytes
-        assert_eq!(session_name("ééééééééééééééééééééééééééé", "x").as_deref(), Some("éééééééééééééééééééééééé…"));
+        assert_eq!(
+            session_name("ééééééééééééééééééééééééééé", "x").as_deref(),
+            Some("éééééééééééééééééééééééé…")
+        );
     }
 
     #[test]
@@ -549,9 +774,18 @@ mod tests {
         assert_eq!(index_color(1), hex(0xcc241d));
         // bold-is-bright for the first 8, not for true colour
         let colors = Colors::default();
-        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors, true), hex(0xfb4934));
-        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors, false), hex(0xcc241d));
-        assert_eq!(resolve(Color::Spec(Rgb { r: 1, g: 2, b: 3 }), &colors, true), Color32::from_rgb(1, 2, 3));
+        assert_eq!(
+            resolve(Color::Named(NamedColor::Red), &colors, true),
+            hex(0xfb4934)
+        );
+        assert_eq!(
+            resolve(Color::Named(NamedColor::Red), &colors, false),
+            hex(0xcc241d)
+        );
+        assert_eq!(
+            resolve(Color::Spec(Rgb { r: 1, g: 2, b: 3 }), &colors, true),
+            Color32::from_rgb(1, 2, 3)
+        );
         set_theme("nope");
         assert_eq!(theme().name, "xterm");
         assert_eq!(index_color(232), Color32::from_gray(8));
